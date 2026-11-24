@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 import hashlib
 from pathlib import Path
@@ -30,6 +30,25 @@ class RiskLimits:
         if self.max_price_deviation > 1:
             raise ValueError("max_price_deviation must not exceed 1.")
 
+    @classmethod
+    def live_defaults(cls):
+        return cls(max_order_quantity=5, max_order_notional=Decimal(500),
+                   max_symbol_exposure=Decimal(1000), max_portfolio_exposure=Decimal(5000),
+                   max_open_orders=3, max_daily_orders=5, max_daily_loss=Decimal(50),
+                   max_price_deviation=Decimal("0.02"), max_quote_age_seconds=30)
+
+
+def profile_settings(values, environment):
+    """Production never falls back to legacy/sandbox credentials."""
+    prefix = "WEBULL_SANDBOX_" if environment == "sandbox" else "WEBULL_LIVE_"
+    fields = {name: values.get(prefix + name) or "" for name in ("APP_KEY", "APP_SECRET", "ACCOUNT_ID")}
+    if environment == "sandbox" and not any(fields.values()):
+        fields = {name: values.get("WEBULL_" + name) or "" for name in fields}
+    return Settings.from_values({
+        **{"WEBULL_" + name: value for name, value in fields.items()}, "WEBULL_ENV": environment,
+        "WEBULL_ENABLE_LIVE_TRADING": (values.get("WEBULL_ENABLE_LIVE_TRADING") or "false") if environment == "production" else "false",
+    })
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -39,6 +58,8 @@ class AppConfig:
     limits: RiskLimits = field(default_factory=RiskLimits)
     reconcile_interval: int = 15
     request_limit: int = 120
+    live_arm_seconds: int = 600
+    profiles: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
         if len(self.api_key) < 32:
@@ -47,6 +68,8 @@ class AppConfig:
             raise ValueError("WEBULL_ACCOUNT_ID is required.")
         if self.reconcile_interval < 0 or self.request_limit <= 0:
             raise ValueError("Invalid server timing/rate configuration.")
+        if not 30 <= self.live_arm_seconds <= 1800:
+            raise ValueError("Live arming duration must be between 30 and 1800 seconds.")
 
     @property
     def identity(self):
@@ -56,16 +79,29 @@ class AppConfig:
     def from_env(cls):
         # Personal backend: .env is the source of truth, not inherited shell values.
         values = dotenv_values(ROOT / ".env", interpolate=False)
-        broker = Settings.from_values(values)
-        fingerprint = hashlib.sha256(broker.account_id.encode()).hexdigest()[:16]
-        limits = RiskLimits(**{
-            name: type(default)(values.get("TRADING_" + name.upper()) or str(default))
-            for name, default in vars(RiskLimits()).items()
-        })
-        return cls(
-            broker=broker,
-            api_key=(values.get("TRADING_API_KEY") or "").strip(),
-            database=ROOT / "data" / f"{broker.environment}_{fingerprint}.sqlite3",
-            limits=limits,
-            reconcile_interval=int(values.get("TRADING_RECONCILE_INTERVAL") or "15"),
-        )
+        active = (values.get("WEBULL_ENV") or "sandbox").strip().lower()
+        if active not in {"sandbox", "production"}:
+            raise ValueError("WEBULL_ENV must be sandbox or production.")
+        profiles = {}
+        for environment in ("sandbox", "production"):
+            broker = profile_settings(values, environment)
+            if not all((broker.app_key, broker.app_secret, broker.account_id)):
+                if environment == active:
+                    raise ValueError(f"Complete the {environment} profile's App Key, App Secret and Account ID in .env.")
+                continue
+            defaults = RiskLimits.live_defaults() if environment == "production" else RiskLimits()
+            prefix = "TRADING_LIVE_" if environment == "production" else "TRADING_"
+            limits = RiskLimits(**{name: type(default)(values.get(prefix + name.upper()) or str(default))
+                                   for name, default in vars(defaults).items()})
+            fingerprint = hashlib.sha256(broker.account_id.encode()).hexdigest()[:16]
+            profiles[environment] = cls(
+                broker=broker, api_key=(values.get("TRADING_API_KEY") or "").strip(),
+                database=ROOT / "data" / f"{environment}_{fingerprint}.sqlite3", limits=limits,
+                reconcile_interval=int(values.get("TRADING_RECONCILE_INTERVAL") or "15"),
+                live_arm_seconds=int(values.get("TRADING_LIVE_ARM_SECONDS") or "600"),
+            )
+        if len(profiles) == 2:
+            sandbox, live = profiles["sandbox"].broker, profiles["production"].broker
+            if any(getattr(sandbox, name) == getattr(live, name) for name in ("app_key", "app_secret", "account_id")):
+                raise ValueError("Sandbox and live App Keys, App Secrets and Account IDs must be distinct.")
+        return replace(profiles[active], profiles=profiles)

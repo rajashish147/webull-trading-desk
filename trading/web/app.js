@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   csrf: null, system: null, busy: 0, orders: [], orderOffset: 0, orderLimit: 25,
   selected: null, watchlist: ["AAPL", "MSFT"], quotes: [], auditAfter: 0,
-  auditHasNext: false, historyKey: null, confirm: null,
+  auditHasNext: false, historyKey: null, confirm: null, desynced: false,
 };
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" :
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(value));
@@ -25,17 +25,63 @@ function notify(message, kind = "info") {
 }
 
 async function api(path, method = "GET", body, extraHeaders = {}) {
-  const headers = { "X-CSRF-Token": state.csrf || "", ...extraHeaders };
+  const headers = { "X-CSRF-Token": state.csrf || "", ...(state.system ? {"X-Trading-Environment": state.system.environment} : {}), ...extraHeaders };
+  const requestedEnvironment = headers["X-Trading-Environment"];
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, { method, headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (["environment_changed", "order_environment_mismatch"].includes(data.error?.code)) {
+      state.desynced = true;
+      closeDialogs();
+    }
     const violations = data.error?.details?.violations;
     const detail = Array.isArray(data.detail) ? data.detail.map((item) => `${item.loc?.slice(1).join(".")}: ${item.msg}`).join("\n") : data.detail;
     const message = violations?.length ? violations.join("\n") : data.error?.message || detail || `Request failed (HTTP ${response.status}).`;
-    throw new Error(response.status === 401 ? "Your local session expired. Reload this page to reconnect to the server." : message);
+    const error = new Error(response.status === 401 ? "Your local session expired. Reload this page to reconnect to the server." : message);
+    error.code = data.error?.code;
+    throw error;
+  }
+  if (requestedEnvironment && state.system && !["/v1/system", "/v1/environment"].includes(path) && requestedEnvironment !== state.system.environment) {
+    state.desynced = true;
+    throw new Error("Discarded an old-profile response. Refresh the environment before acting.");
   }
   return data;
+}
+
+function liveArmed() {
+  return Boolean(state.system?.live_armed && Date.parse(state.system.live_arm_expires_at) > Date.now());
+}
+
+function closeDialogs() {
+  for (const id of ["order-dialog", "confirm-dialog", "modify-dialog"]) if ($(id).open) $(id).close();
+  state.selected = state.confirm = null;
+}
+
+function resetProfileUI() {
+  closeDialogs();
+  state.orders = []; state.quotes = []; state.orderOffset = 0; state.auditAfter = 0;
+  state.auditHasNext = false; state.historyKey = null;
+  $("ticket-form").reset(); $("ticket-price").value = ""; $("risk-result").hidden = true;
+  for (const id of ["cash-value", "buying-power", "portfolio-value", "day-pnl"]) $(id).textContent = "—";
+  tableEmpty($("positions"), 4, "Connect this profile to load its positions.");
+  tableEmpty($("overview-quotes"), 4, "No quotes loaded for this profile.");
+  tableEmpty($("market-quotes"), 4, "No quotes loaded for this profile.");
+  tableEmpty($("orders"), 7, "Loading the selected profile's ledger…");
+  $("recent-orders").replaceChildren(); $("broker-history").textContent = "No history loaded for this profile.";
+  $("broker-open-orders").textContent = "No broker open orders loaded for this profile.";
+  $("chart-summary").textContent = "No data loaded for this profile";
+  drawChart([]); tableEmpty($("bars"), 6, "Fetch historical data for this profile.");
+  updateNotional();
+}
+
+function acceptSystem(system) {
+  if (Number(system.schema_version) < 2) {
+    state.desynced = true;
+    throw new Error("Restart the Python server after updating; this dashboard requires backend version 2.");
+  }
+  if (state.system && state.system.account_fingerprint !== system.account_fingerprint) resetProfileUI();
+  state.system = system; state.desynced = false; renderSystem();
 }
 
 async function run(action, emergency = false) {
@@ -43,31 +89,43 @@ async function run(action, emergency = false) {
   state.busy += 1;
   updateControls();
   try { await action(); }
-  catch (error) { notify(error.message || "Something went wrong. Check the server terminal.", "error"); }
+  catch (error) {
+    if (error.code) {
+      try { acceptSystem(await api("/v1/system")); } catch { state.desynced = true; /* Never retry a mutation. */ }
+    }
+    notify(error.message || "Something went wrong. Check the server terminal.", "error");
+  }
   finally { state.busy -= 1; updateControls(); }
 }
 
 function updateControls() {
-  const ready = Boolean(state.csrf), busy = state.busy > 0;
+  const ready = Boolean(state.csrf && state.system && !state.desynced), busy = state.busy > 0;
   const connected = Boolean(state.system?.connected);
   const sandbox = state.system?.environment === "sandbox";
   const halted = state.system?.kill_switch?.enabled !== false;
   document.querySelectorAll("button").forEach((button) => {
     if (button.dataset.tab || button.classList.contains("icon-button") || ["confirm-back", "modify-back"].includes(button.id)) return;
-    button.disabled = !ready || busy || button.dataset.blocked === "true";
+    button.disabled = !ready || busy || button.dataset.blocked === "true" || (button.dataset.liveRisk === "true" && !liveArmed());
   });
-  ["check-risk", "use-quote", "fetch-quotes", "fetch-bars", "load-history", "reconcile-all"].forEach((id) => {
+  ["check-risk", "use-quote", "fetch-quotes", "fetch-bars", "load-history", "load-broker-open", "reconcile-all"].forEach((id) => {
     $(id).disabled = !ready || busy || !connected;
   });
   $("connect").disabled = !ready || busy || connected;
   $("connect").textContent = connected ? "Connected" : state.busy && !connected ? "Working…" : "Connect Webull";
-  $("enable-trading").disabled = !ready || busy || !connected || !sandbox || !halted;
-  $("halt-trading").disabled = !ready;
+  $("enable-trading").disabled = !ready || busy || !connected || (sandbox ? !halted : !state.system?.live_execution_configured);
+  $("halt-trading").disabled = !state.csrf;
+  $("refresh-all").disabled = !state.csrf || busy;
+  $("environment-picker").disabled = !ready || busy;
   $("orders-previous").disabled = !ready || busy || state.orderOffset === 0;
   $("orders-next").disabled = !ready || busy || state.orders.length < state.orderLimit;
   $("audit-next").disabled = !ready || busy || !state.auditHasNext;
   $("history-next").disabled = !ready || busy || !connected || !state.historyKey;
-  $("confirm-action").disabled = !ready || busy || !$("confirm-check").checked || !state.confirm;
+  const confirmation = state.confirm;
+  const phraseMatches = !confirmation?.phrase || $("confirm-phrase").value.trim() === confirmation.phrase;
+  const validExpiry = !confirmation?.expiresAt || Date.parse(confirmation.expiresAt) > Date.now();
+  const sameEnvironment = !confirmation || confirmation.environment === state.system?.environment;
+  $("confirm-action").disabled = !ready || busy || !$("confirm-check").checked || !confirmation || !phraseMatches || !validExpiry || !sameEnvironment;
+  if (confirmation?.expiresAt) $("confirm-expiry").textContent = validExpiry ? `Confirmation expires in ${Math.max(0, Math.ceil((Date.parse(confirmation.expiresAt) - Date.now()) / 1000))} seconds.` : "Confirmation expired. Go back and request a fresh review.";
 }
 
 function setTab(tab) {
@@ -81,15 +139,26 @@ function setTab(tab) {
 }
 
 function renderSystem() {
-  const system = state.system, connected = Boolean(system.connected), halted = system.kill_switch.enabled;
-  $("environment").textContent = system.environment;
+  const system = state.system, connected = Boolean(system.connected), live = system.environment === "production";
+  const halted = live ? !liveArmed() : system.kill_switch.enabled;
+  $("environment").textContent = live ? "LIVE · REAL MONEY" : "SANDBOX";
   $("environment").classList.toggle("production", system.environment !== "sandbox");
   $("connection-label").textContent = connected ? "Webull connected" : "Not connected";
   $("connection-dot").classList.toggle("muted", !connected);
-  $("account-label").textContent = connected ? `${system.selected_account?.account_label || "Individual Cash"} · ${system.environment}` : "Credentials are loaded from .env. Connect to load your account.";
-  $("trading-status").textContent = halted ? "Trading halted" : "Sandbox trading enabled";
-  $("trading-status").className = "badge " + (halted ? "warning" : "success");
-  $("halt-description").textContent = system.environment !== "sandbox" ? "Production orders are disabled. Read-only access." : halted ? "Drafts and previews are safe. Submissions and replacements are blocked." : "Order submissions still require your explicit confirmation. Halting does not cancel existing orders.";
+  $("account-label").textContent = connected ? `${system.selected_account?.account_label || "Individual Cash"} · ${live ? "LIVE ACCOUNT" : "sandbox"} · account …${system.configured_account_hint}` : "Credentials are loaded from .env. Connect to validate this account.";
+  $("live-warning").hidden = !live;
+  $("funds-label").textContent = live ? "USD · REAL MONEY" : "USD · sandbox funds";
+  $("enable-trading").textContent = live ? liveArmed() ? "Re-arm live trading" : "Arm live trading" : "Enable sandbox trading";
+  $("enable-trading").classList.toggle("live-action", live);
+  $("trading-status").textContent = live ? liveArmed() ? `LIVE ARMED · until ${new Date(system.live_arm_expires_at).toLocaleTimeString()}` : "LIVE DISARMED" : halted ? "Trading halted" : "Sandbox trading enabled";
+  $("trading-status").className = "badge " + (live ? "danger" : halted ? "warning" : "success");
+  $("halt-description").textContent = live ? system.live_execution_configured ? "A live arm is time-limited. Every broker action needs an exact, one-use confirmation." : "Live execution is disabled in .env. Read-only connection and emergency cancellation are available." : halted ? "Drafts and previews are safe. Submissions and replacements are blocked." : "Order submissions still require your explicit confirmation. Halting does not cancel existing orders.";
+  for (const profile of system.profiles || []) {
+    const option = $("environment-picker").querySelector(`option[value="${profile.environment}"]`);
+    option.disabled = !profile.configured;
+    option.textContent = profile.configured ? profile.label : `${profile.label} — configure .env`;
+  }
+  $("environment-picker").value = system.environment;
   const account = system.selected_account?.account_id;
   renderList($("configuration"), {
     "Configuration source": system.configuration_source || ".env",
@@ -98,7 +167,8 @@ function renderSystem() {
     "Broker endpoint": system.broker_endpoint,
     "Selected account": account ? `${account.slice(0, 4)}…${account.slice(-4)}` : "Connect to validate account",
     "Browser access": "Automatic local session · no key entry",
-    "Production orders": "Disabled",
+    "Live execution opt-in": live ? system.live_execution_configured ? "Enabled in .env; arm/confirm required" : "Disabled in .env" : "Switch to live to inspect",
+    "Live arm": live ? liveArmed() ? system.live_arm_expires_at : "Disarmed" : "Not applicable",
     "Order reconciliation": `${system.reconcile_interval_seconds}s · read-only`,
   });
   updateControls();
@@ -220,12 +290,13 @@ function actionButton(label, callback, blocked, kind = "secondary") {
 }
 
 function showOrder(order) {
+  if (order.environment !== state.system?.environment) throw new Error("Order belongs to another profile. Refresh before acting.");
   const changed = state.selected?.id !== order.id;
   state.selected = order;
   if (changed) $("order-preview").hidden = true;
   $("order-dialog-title").textContent = `${order.spec.side} ${order.spec.quantity} ${order.spec.symbol}`;
   $("order-detail").replaceChildren();
-  for (const [label, value] of Object.entries({ "Status": order.state.replaceAll("_", " "), "Limit": price(order.spec.limit_price), "Filled": `${order.filled_quantity} / ${order.spec.quantity}`, "Duration": order.spec.time_in_force, "Session": "Regular hours", "Order ID": `${order.id.slice(0, 8)}…` })) {
+  for (const [label, value] of Object.entries({ "Profile": order.environment === "production" ? "LIVE · REAL MONEY" : "Sandbox", "Account": `…${state.system.configured_account_hint}`, "Status": order.state.replaceAll("_", " "), "Limit": price(order.spec.limit_price), "Filled": `${order.filled_quantity} / ${order.spec.quantity}`, "Duration": order.spec.time_in_force, "Session": "Regular hours", "Order ID": `${order.id.slice(0, 8)}…` })) {
     const cell = node("div"); cell.append(node("small", label), node("strong", value)); $("order-detail").append(cell);
   }
   $("order-json").textContent = JSON.stringify(order, null, 2);
@@ -233,23 +304,28 @@ function showOrder(order) {
   $("order-warning").className = "notification error";
   $("order-warning").textContent = order.last_error || `Pending ${order.pending_action}. Reconcile before taking another action.`;
   $("order-actions").replaceChildren();
-  const connected = Boolean(state.system?.connected), halted = state.system?.kill_switch.enabled !== false;
-  const writable = connected && state.system?.environment === "sandbox";
+  const connected = Boolean(state.system?.connected), live = state.system?.environment === "production";
+  const halted = live ? !liveArmed() : state.system?.kill_switch.enabled !== false;
+  const writable = connected && (!live || liveArmed());
   if (order.state === "DRAFT") {
     actionButton("Preview & risk", () => run(previewSelected), !connected);
-    actionButton("Submit sandbox order", () => confirmAction("Submit sandbox order", `Send BUY/SELL order: ${order.spec.side} ${order.spec.quantity} ${order.spec.symbol} at a ${price(order.spec.limit_price)} limit (${order.spec.time_in_force})? This sends an order to the Individual Cash sandbox account and may fill.`, "Submit sandbox order", submitSelected), !writable || halted, "primary");
+    actionButton(live ? "Review LIVE submission" : "Submit sandbox order", () => live ? run(() => prepareLiveAction("SUBMIT")) : confirmAction("Submit sandbox order", `Send ${order.spec.side} ${order.spec.quantity} ${order.spec.symbol} at a ${price(order.spec.limit_price)} limit (${order.spec.time_in_force})? This sends a sandbox order and may fill.`, "Submit sandbox order", submitSelected), !writable || halted, "primary");
+    const submit = $("order-actions").lastElementChild;
+    if (live) { submit.classList.add("live-action"); submit.dataset.liveRisk = "true"; }
   }
   if (["OPEN", "PARTIALLY_FILLED"].includes(order.state) && !order.pending_action) {
     actionButton("Modify", () => {
       $("modify-quantity").value = order.spec.quantity;
       $("modify-quantity").min = String(Math.floor(Number(order.filled_quantity)) + 1);
       $("modify-price").value = order.spec.limit_price;
+      $("modify-save").textContent = live ? "Review LIVE replacement" : "Send replacement";
       $("modify-dialog").showModal();
     }, !writable || halted);
+    if (live) $("order-actions").lastElementChild.dataset.liveRisk = "true";
   }
   if (!["DRAFT", "CANCELLED", "REJECTED", "EXPIRED"].includes(order.state)) actionButton("Reconcile", () => run(reconcileSelected), !connected);
   if (!["FILLED", "CANCELLED", "REJECTED", "EXPIRED"].includes(order.state)) {
-    actionButton(order.state === "DRAFT" ? "Cancel draft" : "Cancel order", () => confirmAction("Cancel this order?", order.state === "DRAFT" ? "Cancel this offline draft. It has not been submitted to Webull." : `Request cancellation of ${order.spec.symbol} order ${order.id.slice(0, 8)}…. A cancellation request does not guarantee that the order has not filled.`, "Confirm cancellation", cancelSelected), !writable || Boolean(order.pending_action), "danger");
+    actionButton(order.state === "DRAFT" ? "Cancel draft" : live ? "Review LIVE cancellation" : "Cancel order", () => live && order.state !== "DRAFT" ? run(() => prepareLiveAction("CANCEL")) : confirmAction("Cancel this order?", order.state === "DRAFT" ? "Cancel this offline draft. It has not been submitted to Webull." : `Request cancellation of ${order.spec.symbol} order ${order.id.slice(0, 8)}…. The order may have filled before cancellation.`, "Confirm cancellation", cancelSelected), !connected || Boolean(order.pending_action), "danger");
   }
   if (!$("order-dialog").open) $("order-dialog").showModal();
   updateControls();
@@ -262,20 +338,52 @@ async function previewSelected() {
   $("order-preview").textContent = result.risk.allowed ? `Risk checks passed. Nothing submitted.\n\n${JSON.stringify(result.broker_preview, null, 2)}` : `Risk checks blocked this draft:\n${result.risk.violations.join("\n")}\n\nNothing submitted.`;
 }
 
-function confirmAction(title, message, label, callback) {
-  state.confirm = callback;
+function confirmAction(title, message, label, callback, phrase = "", expiresAt = null) {
+  state.confirm = { callback, phrase, expiresAt, environment: state.system?.environment };
   $("confirm-title").textContent = title; $("confirm-message").textContent = message;
   $("confirm-action").textContent = label; $("confirm-check").checked = false;
   $("confirm-check-label").textContent = "I reviewed the account and this action.";
+  $("confirm-phrase-container").hidden = !phrase;
+  $("confirm-phrase").value = "";
+  $("confirm-phrase-label").textContent = phrase ? `Type exactly: ${phrase}` : "";
+  $("confirm-expiry").hidden = !expiresAt;
+  $("confirm-action").classList.toggle("live-action", Boolean(phrase));
   $("confirm-dialog").showModal(); updateControls();
 }
 
 async function updateAfterMutation(order, message) {
   showOrder(order);
   notify(order.last_error ? `${order.state}: ${order.last_error}` : `${message} · ${order.state.replaceAll("_", " ")}`, order.last_error || ["UNKNOWN", "REJECTED"].includes(order.state) ? "error" : "success");
-  await loadOrders();
-  if (state.system.connected) await loadPortfolio();
-  $("order-report").textContent = JSON.stringify(await api("/v1/reports/orders"), null, 2);
+  const reads = [loadOrders(), api("/v1/reports/orders").then(result => {$("order-report").textContent = JSON.stringify(result, null, 2);})];
+  if (state.system.connected) reads.push(loadPortfolio());
+  const outcomes = await Promise.allSettled(reads);
+  if (outcomes.some(result => result.status === "rejected")) notify(`${message} · ${order.state}. Some display refreshes failed/throttled; refresh later, do NOT resubmit.`, "info");
+}
+
+async function prepareLiveAction(operation, replacement = {}) {
+  if (!state.selected || state.system.environment !== "production") throw new Error("Select the intended live order first.");
+  const order = structuredClone(state.selected), environment = state.system.environment;
+  const approval = await api(`/v1/orders/${order.id}/live-approval`, "POST", {operation, ...replacement}, {"X-Trading-Environment": environment});
+  const intent = approval.intent;
+  if (intent.environment !== environment || intent.order_id !== order.id) throw new Error("Live approval identity mismatch.");
+  const spec = intent.spec;
+  const message = `REAL MONEY · LIVE account …${intent.account_hint}\n${operation}: ${spec.side} ${spec.quantity} ${spec.symbol}\nLimit ${price(spec.limit_price)} · ${spec.time_in_force} · regular hours\n\n${operation === "CANCEL" ? "Cancellation may race a fill; verify final status." : "This action can execute a real-money trade. Review all parameters."}\n\nBroker preview: ${approval.broker_preview ? JSON.stringify(approval.broker_preview) : "Not applicable to cancellation"}`;
+  confirmAction(`Confirm LIVE ${operation.toLowerCase()}`, message, `Confirm LIVE ${operation.toLowerCase()}`, async acknowledgement => {
+    const headers = {"X-Trading-Environment": environment, "X-Live-Confirmation": approval.token, "X-Live-Acknowledgement": acknowledgement};
+    let result;
+    if (operation === "SUBMIT") result = await api(`/v1/orders/${order.id}/submit`, "POST", undefined, headers);
+    else if (operation === "REPLACE") result = await api(`/v1/orders/${order.id}`, "PATCH", {quantity: spec.quantity, limit_price: spec.limit_price}, headers);
+    else result = await api(`/v1/orders/${order.id}/cancel`, "POST", undefined, headers);
+    await updateAfterMutation(result, `Live ${operation.toLowerCase()} processed — inspect broker state`);
+  }, approval.acknowledgement, approval.expires_at);
+}
+
+async function loadProfilePreferences() {
+  const watchlist = await api("/v1/watchlist");
+  state.watchlist = watchlist.symbols.length ? watchlist.symbols : ["AAPL", "MSFT"];
+  $("watchlist-symbols").value = state.watchlist.join(", ");
+  const risk = await api("/v1/risk");
+  renderList($("risk-limits"), Object.fromEntries(Object.entries(risk.limits).map(([key, value]) => [key.replaceAll("_", " "), value])));
 }
 
 async function submitSelected() {
@@ -346,7 +454,9 @@ async function fetchBars() {
 }
 
 async function refreshAll() {
-  state.system = await api("/v1/system"); renderSystem();
+  const oldIdentity = state.system?.account_fingerprint;
+  acceptSystem(await api("/v1/system"));
+  if (oldIdentity !== state.system.account_fingerprint) await loadProfilePreferences();
   const reads = [loadOrders(), loadAudit(), api("/v1/reports/orders").then((result) => { $("order-report").textContent = JSON.stringify(result, null, 2); })];
   if (state.system.connected) reads.push(loadPortfolio(), fetchQuotes());
   const outcomes = await Promise.allSettled(reads);
@@ -365,27 +475,45 @@ $("connect").addEventListener("click", () => run(async () => {
 }));
 $("halt-trading").addEventListener("click", () => run(async () => {
   await api("/v1/risk/kill-switch", "PUT", { enabled: true, reason: "Personal dashboard emergency halt" });
-  state.system = await api("/v1/system"); renderSystem();
+  acceptSystem(await api("/v1/system"));
   if (state.selected && $("order-dialog").open) showOrder(state.selected);
-  notify("Trading halted. Existing broker orders are NOT automatically cancelled; inspect and cancel them explicitly.", "success");
+  notify("All profiles halted and live arms invalidated. Existing broker orders are NOT cancelled; inspect and cancel explicitly.", "success");
 }, true));
-$("enable-trading").addEventListener("click", () => confirmAction("Enable sandbox trading?", "Allow explicit order submissions and replacements in the sandbox. No order is placed by enabling trading. Review your account and risk limits first.", "Enable sandbox trading", async () => {
-  await api("/v1/risk/kill-switch", "PUT", { enabled: false, reason: "Personal dashboard reviewed sandbox session" });
-  state.system = await api("/v1/system"); renderSystem();
+$("enable-trading").addEventListener("click", () => {
+  const live = state.system.environment === "production";
+  confirmAction(live ? "Arm REAL-MONEY trading?" : "Enable sandbox trading?", live ? `Enable a short live-trading window for account …${state.system.configured_account_hint}. This does not place an order. Each broker action still requires its own one-use typed confirmation. Re-arming invalidates previous confirmations.` : "Allow explicit sandbox submissions and replacements. No order is placed by enabling trading.", live ? "Arm live trading" : "Enable sandbox trading", async acknowledgement => {
+  if (live) await api("/v1/live/arm", "POST", {confirmation: acknowledgement});
+  else await api("/v1/risk/kill-switch", "PUT", { enabled: false, reason: "Personal dashboard reviewed sandbox session" });
+  acceptSystem(await api("/v1/system"));
   if (state.selected && $("order-dialog").open) showOrder(state.selected);
-  notify("Sandbox trading enabled. Every order still needs a separate submission confirmation.", "success");
-}));
+  notify(live ? "LIVE trading armed temporarily. Every action still requires exact, one-use confirmation." : "Sandbox trading enabled. Every order still needs a separate submission confirmation.", live ? "info" : "success");
+  }, live ? "ENABLE LIVE TRADING" : "");
+});
+
+$("environment-picker").addEventListener("change", event => {
+  const target = event.target.value, source = state.system.environment;
+  event.target.value = source;
+  if (target === source) return;
+  const live = target === "production", phrase = live ? "SWITCH TO LIVE" : "SWITCH TO SANDBOX";
+  confirmAction(live ? "Switch to LIVE account?" : "Switch to sandbox?", "Switching halts all profiles and invalidates live approvals. Active or uncertain orders block switching. Existing holdings are not closed.", live ? "Switch to LIVE" : "Switch to sandbox", async () => {
+    const result = await api("/v1/environment", "PUT", {environment: target, confirmation: phrase}, {"X-Trading-Environment": source});
+    acceptSystem(result);
+    await loadProfilePreferences(); await refreshAll();
+    notify(live ? "LIVE profile selected, DISARMED. Connect and validate the real account before arming." : "Sandbox selected. Trading is halted.", "info");
+  }, live ? phrase : "");
+});
 $("ticket-form").addEventListener("input", () => { updateNotional(); $("risk-result").hidden = true; });
 $("ticket-form").addEventListener("submit", (event) => {
   event.preventDefault(); run(async () => {
     const spec = ticketSpec(); if (!spec) return;
     const serialized = JSON.stringify(spec);
     let intent;
-    try { intent = JSON.parse(sessionStorage.getItem("webull_draft_intent") || "null"); } catch { intent = null; }
+    const storageKey = `webull_draft_intent:${state.system.account_fingerprint}`;
+    try { intent = JSON.parse(sessionStorage.getItem(storageKey) || "null"); } catch { intent = null; }
     if (!intent || intent.spec !== serialized) intent = { key: crypto.randomUUID(), spec: serialized };
-    sessionStorage.setItem("webull_draft_intent", JSON.stringify(intent));
+    sessionStorage.setItem(storageKey, JSON.stringify(intent));
     const order = await api("/v1/orders", "POST", spec, { "Idempotency-Key": intent.key });
-    sessionStorage.removeItem("webull_draft_intent");
+    sessionStorage.removeItem(storageKey);
     await loadOrders(); showOrder(order); notify("Offline draft created. Nothing has been sent to Webull.", "success");
   });
 });
@@ -420,19 +548,29 @@ $("refresh-audit").addEventListener("click", () => run(() => loadAudit(false)));
 $("audit-next").addEventListener("click", () => run(() => loadAudit(true)));
 $("load-history").addEventListener("click", () => run(() => loadHistory(false)));
 $("history-next").addEventListener("click", () => run(() => loadHistory(true)));
+$("load-broker-open").addEventListener("click", () => run(async () => {$("broker-open-orders").textContent = JSON.stringify(await api("/v1/broker/open-orders"), null, 2);}));
 $("close-order").addEventListener("click", () => $("order-dialog").close());
 for (const id of ["close-confirm", "confirm-back"]) $(id).addEventListener("click", () => { $("confirm-dialog").close(); state.confirm = null; });
 $("confirm-dialog").addEventListener("cancel", () => { state.confirm = null; });
 $("confirm-check").addEventListener("change", updateControls);
+$("confirm-phrase").addEventListener("input", updateControls);
 $("confirm-action").addEventListener("click", () => {
-  const callback = state.confirm; if (!callback || !$("confirm-check").checked) return;
-  state.confirm = null; $("confirm-dialog").close(); run(callback);
+  const confirmation = state.confirm;
+  updateControls();
+  if (!confirmation || $("confirm-action").disabled) return;
+  const acknowledgement = $("confirm-phrase").value.trim();
+  state.confirm = null; $("confirm-dialog").close(); run(() => confirmation.callback(acknowledgement));
 });
 for (const id of ["close-modify", "modify-back"]) $(id).addEventListener("click", () => $("modify-dialog").close());
 $("modify-form").addEventListener("submit", (event) => {
   event.preventDefault(); run(async () => {
     const quantity = Number($("modify-quantity").value);
     if (!Number.isInteger(quantity)) throw new Error("Quantity must be a whole number.");
+    if (state.system.environment === "production") {
+      $("modify-dialog").close();
+      await prepareLiveAction("REPLACE", {quantity, limit_price: $("modify-price").value});
+      return;
+    }
     const order = await api(`/v1/orders/${state.selected.id}`, "PATCH", { quantity, limit_price: $("modify-price").value });
     $("modify-dialog").close(); await updateAfterMutation(order, "Replacement processed — check broker status");
   });
@@ -445,14 +583,16 @@ async function boot() {
     if (!response.ok) throw new Error("Open this dashboard at http://127.0.0.1:8000 on the same machine as the Python server.");
     state.csrf = (await response.json()).csrf_token;
     await run(async () => {
-      const watchlist = await api("/v1/watchlist");
-      state.watchlist = watchlist.symbols.length ? watchlist.symbols : ["AAPL", "MSFT"];
-      $("watchlist-symbols").value = state.watchlist.join(", ");
-      const risk = await api("/v1/risk");
-      renderList($("risk-limits"), Object.fromEntries(Object.entries(risk.limits).map(([key, value]) => [key.replaceAll("_", " "), value])));
+      acceptSystem(await api("/v1/system"));
+      await loadProfilePreferences();
       await refreshAll();
     });
   } catch (error) { notify(error.message, "error"); }
   updateControls();
 }
 boot();
+// Local countdown only: no network polling or automated trade decisions.
+setInterval(() => {
+  if (state.system?.environment === "production") renderSystem();
+  if (state.confirm?.expiresAt) updateControls();
+}, 1000);

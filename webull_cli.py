@@ -43,12 +43,20 @@ class Settings:
     def from_env(cls):
         # Existing process environment variables take precedence over .env.
         load_dotenv(ROOT / ".env", override=False)
-        return cls.from_values(os.environ)
+        return cls.from_values(cls.selected_profile_values(os.environ))
 
     @classmethod
     def from_file(cls, path=None):
         """Read a local .env without inheriting stale process environment values."""
-        return cls.from_values(dotenv_values(path or ROOT / ".env", interpolate=False))
+        return cls.from_values(cls.selected_profile_values(dotenv_values(path or ROOT / ".env", interpolate=False)))
+
+    @staticmethod
+    def selected_profile_values(values):
+        mode = (values.get("WEBULL_ENV") or "sandbox").strip().lower()
+        prefix = "WEBULL_LIVE_" if mode == "production" else "WEBULL_SANDBOX_"
+        if mode == "production" or any(values.get(prefix + name) for name in ("APP_KEY", "APP_SECRET", "ACCOUNT_ID")):
+            return {**values, **{"WEBULL_" + name: values.get(prefix + name) or "" for name in ("APP_KEY", "APP_SECRET", "ACCOUNT_ID")}}
+        return values
 
     @classmethod
     def from_values(cls, values):
@@ -189,12 +197,10 @@ def order_payload(args):
 
 
 def check_submission(settings, args):
-    if settings.environment == "production" and not (
-        settings.enable_live_trading and args.confirm_live_order
-    ):
+    if settings.environment == "production":
         raise ValueError(
-            "Live order blocked. Production requires WEBULL_ENABLE_LIVE_TRADING=true "
-            "and --submit --confirm-live-order."
+            "Live order blocked in the legacy CLI. Use the dashboard/API's live arm "
+            "and exact per-order confirmation workflow."
         )
     if settings.environment == "sandbox" and args.confirm_live_order:
         raise ValueError("--confirm-live-order is for production, not sandbox.")

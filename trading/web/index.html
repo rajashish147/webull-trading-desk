@@ -25,20 +25,21 @@
 
     <main>
       <header class="page-header">
-        <div><div class="eyebrow">YOUR TRADING WORKSPACE</div><h1 id="page-title">Overview</h1><p class="subtitle">A simple desk for your Webull sandbox account.</p></div>
-        <div class="header-actions"><span class="chip" id="environment">Loading…</span><button class="button secondary" id="refresh-all">↻ Refresh</button></div>
+        <div><div class="eyebrow">YOUR TRADING WORKSPACE</div><h1 id="page-title">Overview</h1><p class="subtitle">Separate sandbox and live accounts. Manual orders only.</p></div>
+        <div class="header-actions"><label class="environment-picker">Profile<select id="environment-picker" disabled><option value="sandbox">Sandbox</option><option value="production" disabled>Live — configure .env</option></select></label><span class="chip" id="environment">Loading…</span><button class="button secondary" id="refresh-all">↻ Refresh</button></div>
       </header>
 
+      <div id="live-warning" class="notification error" hidden><strong>LIVE ACCOUNT · REAL MONEY</strong> — submissions and replacements require a time-limited live arm and an exact, one-use order confirmation. Expiry or halting does not cancel broker orders.</div>
       <div id="notification" class="notification" role="status" aria-live="polite" hidden></div>
       <div class="connection-bar">
         <div><span class="status-dot muted" id="connection-dot"></span><strong id="connection-label">Not connected</strong><span id="account-label">Connect to load your account.</span></div>
         <button class="button primary" id="connect">Connect Webull</button>
       </div>
-      <div class="safety-bar"><div><span class="badge warning" id="trading-status">Trading halted</span><span id="halt-description">Creating drafts is safe. Enable trading only when you're ready to submit.</span></div><div class="safety-actions"><button class="button secondary small" id="enable-trading" disabled>Enable sandbox trading</button><button class="button danger small" id="halt-trading">Halt trading</button></div></div>
+      <div class="safety-bar"><div><span class="badge warning" id="trading-status">Trading halted</span><span id="halt-description">Creating drafts is safe. Enable trading only when you're ready to submit.</span></div><div class="safety-actions"><button class="button secondary small" id="enable-trading" disabled>Enable sandbox trading</button><button class="button danger small" id="halt-trading">Halt all profiles</button></div></div>
 
       <section class="tab-panel" id="panel-overview" aria-label="Overview">
         <div class="stats-grid">
-          <article class="stat-card"><span>Cash balance</span><strong id="cash-value">—</strong><small>USD · sandbox funds</small></article>
+          <article class="stat-card"><span>Cash balance</span><strong id="cash-value">—</strong><small id="funds-label">USD · sandbox funds</small></article>
           <article class="stat-card"><span>Buying power</span><strong id="buying-power">—</strong><small>Available account buying power</small></article>
           <article class="stat-card"><span>Portfolio value</span><strong id="portfolio-value">—</strong><small>Net liquidation value</small></article>
           <article class="stat-card"><span>Today's P&amp;L</span><strong id="day-pnl">—</strong><small>Reported by Webull</small></article>
@@ -68,7 +69,8 @@
 
       <section class="tab-panel" id="panel-orders" aria-label="Orders" hidden>
         <article class="card"><div class="card-header"><div><h2>Order ledger</h2><p>Inspect, preview, submit, modify, reconcile, or cancel your orders.</p></div><div class="inline-actions"><button class="button secondary small" id="refresh-orders">Refresh ledger</button><button class="button secondary small" id="reconcile-all" disabled>Reconcile active</button></div></div><div class="table-wrap"><table><thead><tr><th>Created</th><th>Symbol</th><th>Side</th><th>Shares / filled</th><th>Limit</th><th>Status</th><th></th></tr></thead><tbody id="orders"><tr><td colspan="7" class="empty">No orders yet.</td></tr></tbody></table></div><div class="pagination"><button class="button secondary small" id="orders-previous" disabled>Previous</button><span id="orders-page">Page 1</span><button class="button secondary small" id="orders-next" disabled>Next</button></div></article>
-        <p class="hint">This ledger only manages orders created by this backend. Broker history also includes orders created elsewhere. “Unknown” outcomes require reconciliation, never blind resubmission.</p>
+        <article class="card"><div class="card-header"><div><h2>Broker open orders</h2><p>Read-only, including orders created outside this ledger</p></div><button class="button secondary small" id="load-broker-open" disabled>Load broker open orders</button></div><pre id="broker-open-orders" class="json-output">Not loaded. Never assume an empty local ledger means there are no broker orders.</pre></article>
+        <p class="hint">This ledger only manages orders created by this backend in the selected profile. “Unknown” outcomes require reconciliation, never blind resubmission. Profile switching is blocked while active/uncertain orders exist.</p>
       </section>
 
       <section class="tab-panel" id="panel-market" aria-label="Market data" hidden>
@@ -90,7 +92,7 @@
   </div>
 
   <dialog id="order-dialog" class="dialog order-dialog"><div class="dialog-header"><div><div class="eyebrow">ORDER DETAILS</div><h2 id="order-dialog-title">Order</h2></div><button class="icon-button" id="close-order" aria-label="Close order details">×</button></div><div id="order-detail" class="order-detail"></div><div id="order-warning" class="notification" hidden></div><div class="dialog-actions" id="order-actions"></div><div id="order-preview" class="preview-output" hidden></div><details><summary>Full order record</summary><pre id="order-json" class="json-output"></pre></details></dialog>
-  <dialog id="confirm-dialog" class="dialog"><div class="dialog-header"><h2 id="confirm-title">Confirm action</h2><button class="icon-button" id="close-confirm" aria-label="Close confirmation">×</button></div><p id="confirm-message"></p><label class="checkbox-label"><input id="confirm-check" type="checkbox"> <span id="confirm-check-label">I have reviewed this action.</span></label><div class="dialog-actions"><button class="button secondary" id="confirm-back">Go back</button><button class="button primary" id="confirm-action" disabled>Confirm</button></div></dialog>
-  <dialog id="modify-dialog" class="dialog"><div class="dialog-header"><h2>Modify sandbox order</h2><button class="icon-button" id="close-modify" aria-label="Close modification">×</button></div><p class="hint">This sends a replacement to Webull. Quantity is the new total, including any already filled shares.</p><form id="modify-form"><label>Total shares<input id="modify-quantity" type="number" min="1" step="1" required></label><label>Limit price (USD)<input id="modify-price" type="number" min="0.000001" step="0.000001" required></label><div class="dialog-actions"><button type="button" class="button secondary" id="modify-back">Go back</button><button class="button primary" type="submit">Send replacement</button></div></form></dialog>
+  <dialog id="confirm-dialog" class="dialog"><div class="dialog-header"><h2 id="confirm-title">Confirm action</h2><button class="icon-button" id="close-confirm" aria-label="Close confirmation">×</button></div><p id="confirm-message"></p><label id="confirm-phrase-container" hidden><span id="confirm-phrase-label">Type the required acknowledgement</span><input id="confirm-phrase" autocomplete="off" spellcheck="false" maxlength="30"></label><small id="confirm-expiry" class="subtle" hidden></small><label class="checkbox-label"><input id="confirm-check" type="checkbox"> <span id="confirm-check-label">I have reviewed this action.</span></label><div class="dialog-actions"><button class="button secondary" id="confirm-back">Go back</button><button class="button primary" id="confirm-action" disabled>Confirm</button></div></dialog>
+  <dialog id="modify-dialog" class="dialog"><div class="dialog-header"><h2>Modify order</h2><button class="icon-button" id="close-modify" aria-label="Close modification">×</button></div><p class="hint">Quantity is the new total, including any already filled shares. Live replacements require an additional exact-order review and typed confirmation.</p><form id="modify-form"><label>Total shares<input id="modify-quantity" type="number" min="1" step="1" required></label><label>Limit price (USD)<input id="modify-price" type="number" min="0.000001" step="0.000001" required></label><div class="dialog-actions"><button type="button" class="button secondary" id="modify-back">Go back</button><button class="button primary" id="modify-save" type="submit">Send replacement</button></div></form></dialog>
 </body>
 </html>

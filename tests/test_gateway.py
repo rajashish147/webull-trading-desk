@@ -22,7 +22,7 @@ class GatewayTests(unittest.TestCase):
         for operation in (lambda: gateway.place({}), lambda: gateway.replace("test", 1, "10"), lambda: gateway.cancel("test")):
             with self.assertRaises(DomainError) as error:
                 operation()
-            self.assertEqual(error.exception.code, "production_read_only")
+            self.assertIn(error.exception.code, {"live_config_disabled", "live_confirmation_required"})
         gateway._trade.order_v3.place_order.assert_not_called()
         gateway._trade.order_v3.replace_order.assert_not_called()
         gateway._trade.order_v3.cancel_order.assert_not_called()

@@ -15,15 +15,21 @@ expose `.env` or the project directory as static files.
 
 Use **Connect Webull**, inspect balances/quotes, and create an offline draft. Order
 submission and trading enablement require separate checked confirmations. The
-kill switch, sandbox-only execution, and all backend risk checks remain in place.
+kill switch, separate sandbox/live profiles, and all backend risk checks remain in place.
 The UI does not automatically poll quotes or submit orders. Static assets have no
 external JavaScript/font dependencies. Existing direct API key authentication
 continues to work for scripts.
 
+**Live actions have additional requirements:** select the production profile,
+validate its separate credentials/account, opt in through `.env`, explicitly arm
+live trading, and use a one-use order approval plus a typed acknowledgement.
+See [LIVE_TRADING.md](LIVE_TRADING.md). Sandbox remains the default startup mode.
+
 ## Architecture
 
 ```text
-HTTP API (FastAPI, X-API-Key)
+HTTP API (FastAPI, X-API-Key or local session)
+    → ProfileManager (environment binding, isolated ledgers, all-profile halt)
     → TradingService (serialized mutations, durable intents)
         → RiskEngine (fresh USD cash, positions, open orders, quote)
         → WebullGateway (official SDK, HTTPS, no mutation retries)
@@ -35,7 +41,8 @@ Files: `trading/app.py`, `trading/service.py`, `trading/risk.py`,
 `trading/broker.py`, `trading/database.py`, `trading/config.py`, and
 `trading/models.py`. The original `webull_cli.py` remains a separate tool.
 
-The backend is single-worker/single-account. A process lock prevents two backend
+The backend is single-worker, with one Individual Cash account per environment.
+A process lock prevents two backend
 workers sharing one ledger. The database path contains a hash of the configured
 account and is isolated by sandbox/production; its identity is checked on startup.
 
@@ -56,7 +63,7 @@ In another PowerShell window, load the key into a variable **without displaying 
 
 ```powershell
 $key = (& .\.venv\Scripts\python.exe -c "from dotenv import dotenv_values; print(dotenv_values('.env')['TRADING_API_KEY'])").Trim()
-$headers = @{ 'X-API-Key' = $key }
+$headers = @{ 'X-API-Key' = $key; 'X-Trading-Environment' = 'sandbox' }
 $base = 'http://127.0.0.1:8000'
 Invoke-RestMethod "$base/health"
 Invoke-RestMethod "$base/v1/system" -Headers $headers
@@ -86,6 +93,9 @@ API key is entered into or sent to the browser.
 |---|---|---|
 | GET | `/health` | Public liveness, no brokerage request |
 | GET | `/v1/system` | Environment, connection, selected account, halt state |
+| GET | `/v1/environments` | Profile availability, without credentials |
+| PUT | `/v1/environment` | Explicit profile switch; halts all profiles |
+| POST | `/v1/live/arm` | Typed, time-limited live arming; never submits an order |
 | POST | `/v1/broker/connect` | Initialize/validate selected Individual Cash account |
 | GET | `/v1/broker/accounts` | Broker account list |
 | GET | `/v1/portfolio` | Broker balances and positions |
@@ -102,17 +112,24 @@ API key is entered into or sent to the browser.
 | GET | `/v1/orders?limit=100&offset=0` | Paginated local ledger |
 | GET | `/v1/orders/{id}` | Local order and reconciliation state |
 | POST | `/v1/orders/{id}/preview` | Risk check + Webull cost preview; no submission |
-| POST | `/v1/orders/{id}/submit` | Explicit submission, sandbox only |
-| PATCH | `/v1/orders/{id}` | Replace quantity and limit, sandbox only |
-| POST | `/v1/orders/{id}/cancel` | Cancel this local order, sandbox only |
+| POST | `/v1/orders/{id}/live-approval` | Read/validate an exact live action and issue a 60-second approval |
+| POST | `/v1/orders/{id}/submit` | Explicit submission; live requires arm and exact approval |
+| PATCH | `/v1/orders/{id}` | Replace quantity and limit; live requires arm and exact approval |
+| POST | `/v1/orders/{id}/cancel` | Cancel this local order; live needs approval but not an arm |
 | POST | `/v1/orders/{id}/reconcile` | Fetch broker detail and update local state |
-| POST | `/v1/reconcile` | Reconcile up to five active local orders |
+| POST | `/v1/reconcile` | Reconcile up to five sandbox / two live active local orders |
 | GET | `/v1/audit?after=0&limit=100` | Cursor-paginated audit events |
 | GET | `/v1/reports/orders` | Local order counts and UTC submission attempts |
 
 The local watchlist is not synced to the Webull app. Financial P&L comes from broker
 portfolio responses; local reports do not fabricate returns, fees, or realized P&L.
 Cancelled drafts appear in the local ledger without having been broker orders.
+
+All production writes require `X-Trading-Environment: production`. An environment
+header that no longer matches the active profile returns 409; clients must refresh
+and re-review, never blindly resend. `/v1/system` remains available to discover the
+active profile. Account display snapshots can be cached for up to two seconds to
+respect broker quotas; risk checks always fetch fresh account data.
 
 ## Draft → preview → submit
 
@@ -131,7 +148,7 @@ $body = @{
     time_in_force = 'DAY'
     trading_session = 'CORE'
 } | ConvertTo-Json
-$orderHeaders = @{ 'X-API-Key' = $key; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
+$orderHeaders = @{ 'X-API-Key' = $key; 'X-Trading-Environment' = 'sandbox'; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
 $draft = Invoke-RestMethod "$base/v1/orders" -Method Post -Headers $orderHeaders -ContentType 'application/json' -Body $body
 Invoke-RestMethod "$base/v1/orders/$($draft.id)/preview" -Method Post -Headers $headers
 ```
@@ -143,7 +160,8 @@ Submissions always rerun risk checks using fresh broker data.
 ### Deliberate sandbox submission
 
 **Only run this block when you intend to send the reviewed sandbox order.** A limit
-near the quote can fill. Check `/v1/system` first; production mutations are blocked.
+near the quote can fill. These examples explicitly bind to sandbox. Production
+requires the separate live workflow; never remove environment headers to bypass it.
 
 ```powershell
 $enable = @{ enabled = $false; reason = 'Reviewed sandbox trading session' } | ConvertTo-Json
@@ -174,7 +192,8 @@ Repeated cancellation of an already cancelled/terminal order does not send again
 
 ## Risk controls
 
-Defaults are intentionally conservative and editable through environment settings
+The table below lists **sandbox defaults**. Live has smaller, separate defaults
+listed in [LIVE_TRADING.md](LIVE_TRADING.md). Limits are editable through environment settings
 before a restart. Prices/financial calculations use `Decimal`, not binary floats.
 
 | Setting | Default |
@@ -254,7 +273,7 @@ account/order-read quotas. Other scripts using the same Webull App Key share the
 broker's quota but are not coordinated with this process's limiter.
 
 - **401:** backend key missing/incorrect.
-- **403:** production mutation blocked.
+- **403:** live opt-in disabled or invalid/missing SDK execution authorization.
 - **409:** idempotency conflict, risk rejection, or invalid/pending state.
 - **422:** invalid request/unsupported order type or missing idempotency key.
 - **429:** local API/broker quota or Webull throttling; retry reads later.
@@ -279,7 +298,9 @@ To restore, stop the server and use a verified backup matching the same broker
 environment/account; reconcile against broker activity before explicitly enabling
 trading. Do not delete a ledger to bypass an unresolved mutation.
 
-No automatic audit retention, encryption, migrations beyond schema v1, disaster-
+Schema 1 is backed up automatically before migration to schema 2; order records
+are preserved and bound to their account/environment. No automatic audit retention,
+encryption, migrations beyond the supported 1→2 upgrade, disaster-
 recovery orchestration, distributed execution, or production compliance tooling
 is implemented. Review those before considering any future live deployment.
 

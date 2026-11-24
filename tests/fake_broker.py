@@ -7,7 +7,9 @@ from trading.models import BrokerError, DomainError
 class FakeBroker:
     """No-network exchange fixture. Never imports/initializes the live SDK."""
 
-    def __init__(self):
+    def __init__(self, account_id="fake-cash-account"):
+        self.account_id = account_id
+        self.last_permit = None
         self.connected = False
         self.account_summary = None
         self.order_data = {}
@@ -24,7 +26,7 @@ class FakeBroker:
 
     def connect(self):
         self.connected = True
-        self.account_summary = {"account_id": "fake-cash-account", "account_class": "INDIVIDUAL_CASH"}
+        self.account_summary = {"account_id": self.account_id, "account_class": "INDIVIDUAL_CASH", "account_label": "Individual Cash fixture"}
         return self.account_summary
 
     def _ready(self):
@@ -63,9 +65,10 @@ class FakeBroker:
 
     def preview(self, payload):
         self._ready()
-        return {"estimated_cost": str(float(payload["limit_price"]) * int(payload["quantity"])), "currency": "USD"}
+        return {"estimated_cost": str(float(payload["limit_price"]) * int(payload["quantity"])), "estimated_transaction_fee": "0", "currency": "USD"}
 
-    def place(self, payload):
+    def place(self, payload, permit=None):
+        self.last_permit = permit
         self._ready()
         self.place_calls += 1
         if self.place_error and self.place_error.definitive:
@@ -83,7 +86,8 @@ class FakeBroker:
             raise BrokerError("Order not found.", definitive=True)
         return {"client_order_id": key, "orders": [deepcopy(self.order_data[key])]}
 
-    def replace(self, key, quantity, limit_price):
+    def replace(self, key, quantity, limit_price, permit=None):
+        self.last_permit = permit
         self.replace_calls += 1
         if not self.hold_replace:
             self.order_data[key].update(total_quantity=str(quantity), limit_price=str(limit_price))
@@ -91,7 +95,8 @@ class FakeBroker:
             raise self.replace_error
         return {"client_order_id": key, "order_id": "broker-" + key}
 
-    def cancel(self, key):
+    def cancel(self, key, permit=None):
+        self.last_permit = permit
         self.cancel_calls += 1
         if not self.hold_cancel:
             self.order_data[key]["status"] = "CANCELLED"

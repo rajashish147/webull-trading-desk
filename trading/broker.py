@@ -8,6 +8,7 @@ from webull.data.data_client import DataClient
 from webull.trade.trade_client import TradeClient
 
 from trading.models import BrokerError, DomainError
+from trading.safety import ExecutionPermit, digest
 from webull_cli import api_client, redact
 
 
@@ -21,6 +22,8 @@ class WebullGateway:
         self._client = self._trade = self._data = None
         self.lock = threading.RLock()
         self.calls = defaultdict(deque)
+        self._used_permits = {}
+        self._account_cache = {}
 
     def _rate_limit(self, name):
         # Conservative sandbox quotas; production's 2/2s query limits also apply.
@@ -56,7 +59,10 @@ class WebullGateway:
                     data.get("error_code") or data.get("code", 0) not in (0, "0", 200, "200", "SUCCESS")
                 ):
                     raise BrokerError(f"Webull {name} returned a business error.", definitive=True)
-                return json.loads(redact(json.dumps(data), self.settings))
+                cleaned = json.loads(redact(json.dumps(data), self.settings))
+                if name in {"balance", "positions"}:
+                    self._account_cache[name] = (time.monotonic(), cleaned)
+                return cleaned
             except BrokerError:
                 raise
             except (ValueError, TypeError) as exc:
@@ -86,10 +92,32 @@ class WebullGateway:
         if not self.connected:
             raise DomainError("broker_not_connected", "Call POST /v1/broker/connect first.", 503)
 
-    def _writable(self):
+    def _writable(self, operation, client_order_id, payload, permit):
         self._ready()
-        if self.settings.environment != "sandbox":
-            raise DomainError("production_read_only", "Production mutations are disabled in this version.", 403)
+        if self.settings.environment == "sandbox":
+            if permit is not None:
+                raise DomainError("unexpected_live_permit", "Live authorization cannot be used in sandbox.", 403)
+            return
+        if operation != "CANCEL" and not self.settings.enable_live_trading:
+            error = DomainError("live_config_disabled", "Live execution is disabled in .env.", 403)
+            error.definitive = True
+            raise error
+        if not isinstance(permit, ExecutionPermit) or not (
+            permit.environment == "production" and permit.account_id == self.settings.account_id
+            and permit.operation == operation and permit.client_order_id == client_order_id
+            and permit.payload_hash == digest(payload) and permit.expires_at > time.time()
+        ):
+            error = DomainError("live_confirmation_required", "A valid, exact live execution permit is required.", 403)
+            error.definitive = True
+            raise error
+        fingerprint = digest({"operation": operation, "order_id": client_order_id,
+                              "payload": permit.payload_hash, "expires_at": permit.expires_at})
+        self._used_permits = {key: expiry for key, expiry in self._used_permits.items() if expiry > time.time()}
+        if fingerprint in self._used_permits:
+            error = DomainError("live_permit_used", "This execution permit was already dispatched.", 403)
+            error.definitive = True
+            raise error
+        self._used_permits[fingerprint] = permit.expires_at
 
     def accounts(self):
         self._ready()
@@ -102,6 +130,15 @@ class WebullGateway:
     def positions(self):
         self._ready()
         return self._request("positions", lambda: self._trade.account_v2.get_account_position(self.settings.account_id))
+
+    def portfolio(self):
+        """Dashboard-only 2-second cache; risk methods above ALWAYS fetch fresh data."""
+        self._ready()
+        with self.lock:
+            timestamp = time.monotonic()
+            if all(name in self._account_cache and timestamp - self._account_cache[name][0] < 2 for name in ("balance", "positions")):
+                return {"balance": self._account_cache["balance"][1], "positions": self._account_cache["positions"][1], "cached": True}
+            return {"balance": self.balance(), "positions": self.positions(), "cached": False}
 
     def open_orders(self):
         self._ready()
@@ -156,16 +193,18 @@ class WebullGateway:
         self._ready()
         return self._request("preview", lambda: self._trade.order_v3.preview_order(self.settings.account_id, [payload]))
 
-    def place(self, payload):
-        self._writable()
-        return self._request("place", lambda: self._trade.order_v3.place_order(self.settings.account_id, [payload]))
+    def place(self, payload, permit=None):
+        with self.lock:
+            self._writable("SUBMIT", payload.get("client_order_id"), payload, permit)
+            return self._request("place", lambda: self._trade.order_v3.place_order(self.settings.account_id, [payload]))
 
-    def replace(self, client_order_id, quantity, limit_price):
-        self._writable()
-        return self._request("replace", lambda: self._trade.order_v3.replace_order(self.settings.account_id, [{
-            "client_order_id": client_order_id, "quantity": str(quantity), "limit_price": str(limit_price),
-        }]))
+    def replace(self, client_order_id, quantity, limit_price, permit=None):
+        payload = {"client_order_id": client_order_id, "quantity": str(quantity), "limit_price": str(limit_price)}
+        with self.lock:
+            self._writable("REPLACE", client_order_id, payload, permit)
+            return self._request("replace", lambda: self._trade.order_v3.replace_order(self.settings.account_id, [payload]))
 
-    def cancel(self, client_order_id):
-        self._writable()
-        return self._request("cancel", lambda: self._trade.order_v3.cancel_order(self.settings.account_id, client_order_id))
+    def cancel(self, client_order_id, permit=None):
+        with self.lock:
+            self._writable("CANCEL", client_order_id, {"client_order_id": client_order_id}, permit)
+            return self._request("cancel", lambda: self._trade.order_v3.cancel_order(self.settings.account_id, client_order_id))

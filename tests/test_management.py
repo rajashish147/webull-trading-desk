@@ -50,13 +50,13 @@ class ManagementTests(unittest.TestCase):
 
     def test_initialization_updates_only_account_and_generates_backend_key(self):
         path = self.root / ".env"
-        path.write_text("WEBULL_ENV=sandbox\nWEBULL_APP_KEY=fixture-key\nWEBULL_APP_SECRET=fixture-secret\nWEBULL_ACCOUNT_ID=old\nWEBULL_ENABLE_LIVE_TRADING=false\n")
+        path.write_text("WEBULL_ENV=sandbox\nWEBULL_APP_KEY=fixture-key\nWEBULL_APP_SECRET=fixture-secret\nWEBULL_ACCOUNT_ID=\nWEBULL_ENABLE_LIVE_TRADING=false\n")
         response = Mock(status_code=200)
         response.json.return_value = [{"account_class": "INDIVIDUAL_CASH", "account_id": "chosen-cash"}]
         trade = Mock()
         trade.account_v2.get_account_list.return_value = response
         output = io.StringIO()
-        with patch.object(manage, "ROOT", self.root), patch.object(manage.Settings, "from_file", return_value=Settings()):
+        with patch.object(manage, "ROOT", self.root):
             with patch("webull_cli.api_client"), patch("webull.trade.trade_client.TradeClient", return_value=trade), redirect_stdout(output):
                 manage.initialize()
         values = dotenv_values(path)
@@ -68,10 +68,12 @@ class ManagementTests(unittest.TestCase):
         self.assertNotIn(values["TRADING_API_KEY"], output.getvalue())
         trade.order_v3.place_order.assert_not_called()
 
-    def test_initialization_refuses_production_and_live_flag(self):
-        for settings in (Settings(environment="production"), Settings(enable_live_trading=True)):
-            with patch.object(manage.Settings, "from_file", return_value=settings), self.assertRaises(ValueError):
-                manage.initialize()
+    def test_initialization_requires_profile_credentials_without_network(self):
+        with patch.object(manage, "dotenv_values", return_value={}), patch("webull_cli.api_client") as client:
+            for environment in ("sandbox", "production"):
+                with self.assertRaises(ValueError):
+                    manage.initialize(environment)
+            client.assert_not_called()
 
 
 if __name__ == "__main__":

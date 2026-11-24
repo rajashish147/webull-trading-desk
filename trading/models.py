@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Symbol = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9.\-]{0,19}$")]
 Price = Annotated[Decimal, Field(gt=0, le=1000000, max_digits=13, decimal_places=6, allow_inf_nan=False)]
@@ -59,6 +59,30 @@ class HaltRequest(StrictModel):
 
 class WatchlistRequest(StrictModel):
     symbols: Annotated[list[Symbol], Field(max_length=100)]
+
+
+class EnvironmentRequest(StrictModel):
+    environment: Literal["sandbox", "production"]
+    confirmation: str
+
+
+class LiveArmRequest(StrictModel):
+    confirmation: Literal["ENABLE LIVE TRADING"]
+
+
+class LiveApprovalRequest(StrictModel):
+    operation: Literal["SUBMIT", "REPLACE", "CANCEL"]
+    quantity: Annotated[int, Field(gt=0, le=100000, strict=True)] | None = None
+    limit_price: Price | None = None
+
+    @model_validator(mode="after")
+    def validate_parameters(self):
+        if self.operation == "REPLACE":
+            if self.quantity is None or self.limit_price is None:
+                raise ValueError("Replacement approval requires quantity and limit_price.")
+        elif self.quantity is not None or self.limit_price is not None:
+            raise ValueError("Submit/cancel approvals cannot override order parameters.")
+        return self
 
 
 class DomainError(Exception):

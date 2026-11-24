@@ -108,7 +108,8 @@ the server to apply changes.
 
 Every startup is **halted**. Creating a draft or connecting does not submit an
 order. Explicitly review and enable sandbox trading only when you intend to submit
-an order. Production broker mutations remain disabled.
+an order. Live execution remains disabled by default. Optional live profiles use
+separate credentials and additional safeguards described in [LIVE_TRADING.md](LIVE_TRADING.md).
 
 If port 8000 is occupied:
 

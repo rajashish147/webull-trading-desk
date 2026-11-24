@@ -74,10 +74,11 @@ class StarterTests(unittest.TestCase):
                         cli.execute_command(cli.parser().parse_args(argv), settings)
                     client.assert_not_called()
 
-    def test_live_guards_allow_explicit_opt_in(self):
+    def test_live_cli_cannot_bypass_backend_confirmations(self):
         settings = cli.Settings(environment="production", enable_live_trading=True)
         args = cli.parser().parse_args(self.order_args + ["--submit", "--confirm-live-order"])
-        cli.check_submission(settings, args)
+        with self.assertRaisesRegex(ValueError, "legacy CLI"):
+            cli.check_submission(settings, args)
 
     def test_sandbox_rejects_live_confirmation(self):
         args = cli.parser().parse_args(self.order_args + ["--submit", "--confirm-live-order"])

@@ -4,6 +4,24 @@ A simple local dashboard backed by **FastAPI + SQLite** and Webull's official Py
 SDK. Credentials are read directly from your project’s `.env` file on the Python
 server. **No API-key entry or login is needed in the local UI.**
 
+## Sandbox and controlled live trading
+
+Version 2 supports **separate sandbox/live credentials, clients, ledgers, and risk
+limits**. Sandbox remains the recommended startup profile. Live is **disabled by
+default** and requires production credential/account validation, a short-lived
+typed arm, and an exact one-use confirmation for each broker action.
+
+Read **[the live-trading operating guide](docs/LIVE_TRADING.md)** before using a
+real account. This is a personal, supervised cash-equity execution tool, **not a
+broker-certified or guaranteed production platform**. All development execution
+tests use mock brokers; no real-money orders are placed by setup or tests.
+
+## Already running? Daily-use guide
+
+Read **[the dashboard user guide](docs/USER_GUIDE.md)** for the button-by-button
+workflow: data → draft → preview → explicit submission → reconcile → modify/cancel
+→ finish safely. It covers operation, not installation.
+
 ## Fresh Windows PC
 
 **Credentials and local trading data are not included in this public repository.**
@@ -47,7 +65,10 @@ and App Secret are preserved. They are never bundled with the source code.
 - Browser access is automatic using a loopback-only local session. Direct API
   clients may still use the backend `X-API-Key` from `.env`.
 - Every startup is **halted**. Connecting or creating a draft does not trade.
-- Production brokerage mutations are **hard-disabled** in this backend.
+- Use the **Profile** selector to choose sandbox/live. Switching halts all profiles
+  and is blocked while active/uncertain orders exist. Stale tabs cannot retarget orders.
+- Live orders require `WEBULL_ENABLE_LIVE_TRADING=true`, an explicit temporary arm,
+  and per-order typed confirmation. Live cancellation remains available while disarmed.
 
 Read [the complete API and operating guide](docs/API.md) before enabling trading.
 
@@ -68,10 +89,13 @@ its environment-variable override behavior.
 - Read-only background reconciliation; never automatic order submission/retry.
 - Persistent local watchlist, paginated audit trail, local order reports, SQLite backups.
 - API-key authentication, per-endpoint broker quotas, request IDs, single-process database ownership.
+- One-use live approvals bound to account, environment, order revision, operation,
+  quantity and price; approvals expire after 60 seconds.
+- Automatic schema-1 backup/migration to schema 2 without discarding existing orders.
 
 ### Scope and limitations
 
-This is a **sandbox-first manual execution backend**, not a production-certified
+This is a **sandbox-first, optionally live manual execution backend**, not a production-certified
 brokerage platform. It supports **whole-share LIMIT BUY/SELL orders, DAY/GTC, CORE
 session**, and a single Individual Cash account. Market/stop orders, fractional
 shares, shorting, options, strategy automation, backtesting, MQTT/gRPC streaming,
@@ -190,27 +214,21 @@ and account activity in Webull before retrying: the order may have succeeded.**
 Use the same client order ID when reconciling an ambiguous submission; do not
 blindly send a new order. Open orders alone cannot rule out an immediate fill.
 
-## 5. Production / live trading (later)
+## 5. Live trading: use the guarded dashboard/API, not the legacy CLI
 
 Sandbox keys cannot be assumed to work in production. Obtain production access
 and production keys through Webull's **Developer Console → Access Credentials →
 API Keys**. An opened brokerage account is required for the retail production
 application; Webull reviews access. Set up market-data subscriptions separately.
 
-To read your live account later, replace the local credentials and account ID and
-set `WEBULL_ENV=production`, **keeping `WEBULL_ENABLE_LIVE_TRADING=false`**.
-Then run `status`, `accounts`, and other read-only commands first.
+Keep sandbox credentials separate. Use `WEBULL_LIVE_APP_KEY`,
+`WEBULL_LIVE_APP_SECRET`, and `WEBULL_LIVE_ACCOUNT_ID`; production never falls back
+to generic/sandbox credentials. See [LIVE_TRADING.md](docs/LIVE_TRADING.md) for
+read-only validation, pilot limits, arming, approvals, and emergency cancellation.
 
-Production order submission is blocked unless **all three** are explicitly set:
-
-1. `.env`: `WEBULL_ENABLE_LIVE_TRADING=true`
-2. Order command: `--submit`
-3. Order command: `--confirm-live-order`
-
-Without `--submit`, `order` remains offline even in production. These CLI guards
-are not broker-level permissions and do not protect a different script using the
-SDK directly. Leave live trading disabled until you have reviewed permissions,
-account selection, order parameters, and tested your workflow.
+**Production order submission in the legacy CLI is now always blocked**, even with
+its old confirmation flag. Live execution must use the guarded dashboard/API.
+Do not use raw SDK calls to bypass the risk/confirmation layer.
 
 ## Reinstall and run local tests
 

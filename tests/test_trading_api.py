@@ -313,13 +313,14 @@ class TradingAPITests(unittest.TestCase):
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertEqual(len(response.headers["X-Request-ID"]), 32)
 
-    def test_production_writes_are_hard_blocked(self):
+    def test_configuration_mutation_cannot_retarget_a_sandbox_order(self):
         self.connect(enable=True)
+        order = self.draft()
         service = self.app.state.service
         service.config = replace(self.config, broker=Settings(environment="production", account_id="fake", enable_live_trading=True))
         with self.assertRaises(DomainError) as error:
-            service.submit(self.draft()["id"])
-        self.assertEqual(error.exception.code, "production_read_only")
+            service.submit(order["id"])
+        self.assertEqual(error.exception.code, "order_environment_mismatch")
         self.assertEqual(self.broker.place_calls, 0)
 
     def test_restart_recovers_interrupted_intent_and_halts(self):
