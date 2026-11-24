@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Webull Desk · Personal Trading</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="brand-mark">W</span><span>Webull Desk<small>PERSONAL WORKSPACE</small></span></a>
+      <nav aria-label="Main navigation">
+        <button class="nav-item active" data-tab="overview" aria-current="page"><span>◫</span> Overview</button>
+        <button class="nav-item" data-tab="orders"><span>⇄</span> Orders</button>
+        <button class="nav-item" data-tab="market"><span>↗</span> Market data</button>
+        <button class="nav-item" data-tab="activity"><span>≡</span> Activity</button>
+        <button class="nav-item" data-tab="settings"><span>⚙</span> Settings</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="status-dot"></span> Local, private, personal<p>Credentials loaded on the server<br>directly from your <code>.env</code>.</p><a href="/docs" target="_blank" rel="noopener noreferrer">API reference ↗</a></div>
+    </aside>
+
+    <main>
+      <header class="page-header">
+        <div><div class="eyebrow">YOUR TRADING WORKSPACE</div><h1 id="page-title">Overview</h1><p class="subtitle">A simple desk for your Webull sandbox account.</p></div>
+        <div class="header-actions"><span class="chip" id="environment">Loading…</span><button class="button secondary" id="refresh-all">↻ Refresh</button></div>
+      </header>
+
+      <div id="notification" class="notification" role="status" aria-live="polite" hidden></div>
+      <div class="connection-bar">
+        <div><span class="status-dot muted" id="connection-dot"></span><strong id="connection-label">Not connected</strong><span id="account-label">Connect to load your account.</span></div>
+        <button class="button primary" id="connect">Connect Webull</button>
+      </div>
+      <div class="safety-bar"><div><span class="badge warning" id="trading-status">Trading halted</span><span id="halt-description">Creating drafts is safe. Enable trading only when you're ready to submit.</span></div><div class="safety-actions"><button class="button secondary small" id="enable-trading" disabled>Enable sandbox trading</button><button class="button danger small" id="halt-trading">Halt trading</button></div></div>
+
+      <section class="tab-panel" id="panel-overview" aria-label="Overview">
+        <div class="stats-grid">
+          <article class="stat-card"><span>Cash balance</span><strong id="cash-value">—</strong><small>USD · sandbox funds</small></article>
+          <article class="stat-card"><span>Buying power</span><strong id="buying-power">—</strong><small>Available account buying power</small></article>
+          <article class="stat-card"><span>Portfolio value</span><strong id="portfolio-value">—</strong><small>Net liquidation value</small></article>
+          <article class="stat-card"><span>Today's P&amp;L</span><strong id="day-pnl">—</strong><small>Reported by Webull</small></article>
+        </div>
+        <div class="overview-grid">
+          <div class="stack">
+            <article class="card"><div class="card-header"><div><h2>Market watch</h2><p>Snapshot prices · select a symbol to fill the ticket</p></div><button class="text-button" data-tab="market">Explore market ↗</button></div><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Last price</th><th>Change</th><th>Bid / ask</th></tr></thead><tbody id="overview-quotes"><tr><td colspan="4" class="empty">Connect Webull to load your watchlist.</td></tr></tbody></table></div></article>
+            <article class="card"><div class="card-header"><div><h2>Your positions</h2><p>Current holdings in the selected account</p></div><span class="count" id="position-count">0</span></div><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Quantity</th><th>Last price</th><th>Unrealized P&amp;L</th></tr></thead><tbody id="positions"><tr><td colspan="4" class="empty">No portfolio loaded yet.</td></tr></tbody></table></div></article>
+            <article class="card"><div class="card-header"><div><h2>Recent orders</h2><p>Orders created through this trading desk</p></div><button class="text-button" data-tab="orders">View all ↗</button></div><div id="recent-orders" class="recent-list"><p class="empty">No orders yet. Start with an offline draft.</p></div></article>
+          </div>
+          <article class="card ticket">
+            <div class="card-header"><div><h2>Order ticket</h2><p>Review first. Submit separately.</p></div><span class="badge neutral">LIMIT</span></div>
+            <form id="ticket-form">
+              <label>Symbol<input id="ticket-symbol" name="symbol" value="AAPL" maxlength="20" autocomplete="off" required></label>
+              <div class="form-row"><label>Side<select id="ticket-side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select></label><label>Shares<input id="ticket-quantity" type="number" min="1" max="100000" step="1" value="1" required></label></div>
+              <label>Limit price (USD)<div class="input-button"><input id="ticket-price" type="number" min="0.000001" max="1000000" step="0.000001" placeholder="Enter your reviewed price" required><button type="button" class="button secondary small" id="use-quote" disabled>Use quote</button></div></label>
+              <div class="form-row"><label>Duration<select id="ticket-tif"><option value="DAY">Day</option><option value="GTC">Good till cancelled</option></select></label><label>Session<input value="Regular hours" disabled></label></div>
+              <div class="ticket-estimate"><span>Limit notional</span><strong id="ticket-notional">—</strong></div>
+              <button type="button" class="button secondary full" id="check-risk" disabled>Check risk</button>
+              <button type="submit" class="button primary full" id="create-draft">Create offline draft</button>
+            </form>
+            <div id="risk-result" class="risk-result" aria-live="polite" hidden></div>
+            <p class="hint">A draft does not place a broker order. All submissions require a separate confirmation. Whole-share limit orders only.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-orders" aria-label="Orders" hidden>
+        <article class="card"><div class="card-header"><div><h2>Order ledger</h2><p>Inspect, preview, submit, modify, reconcile, or cancel your orders.</p></div><div class="inline-actions"><button class="button secondary small" id="refresh-orders">Refresh ledger</button><button class="button secondary small" id="reconcile-all" disabled>Reconcile active</button></div></div><div class="table-wrap"><table><thead><tr><th>Created</th><th>Symbol</th><th>Side</th><th>Shares / filled</th><th>Limit</th><th>Status</th><th></th></tr></thead><tbody id="orders"><tr><td colspan="7" class="empty">No orders yet.</td></tr></tbody></table></div><div class="pagination"><button class="button secondary small" id="orders-previous" disabled>Previous</button><span id="orders-page">Page 1</span><button class="button secondary small" id="orders-next" disabled>Next</button></div></article>
+        <p class="hint">This ledger only manages orders created by this backend. Broker history also includes orders created elsewhere. “Unknown” outcomes require reconciliation, never blind resubmission.</p>
+      </section>
+
+      <section class="tab-panel" id="panel-market" aria-label="Market data" hidden>
+        <article class="card"><div class="card-header"><div><h2>Watchlist</h2><p>Local watchlist · prices update when you refresh</p></div></div><form id="watchlist-form" class="market-toolbar"><label>Symbols, comma-separated<input id="watchlist-symbols" value="AAPL, MSFT" autocomplete="off" required></label><button class="button secondary" type="submit">Save watchlist</button><button class="button primary" type="button" id="fetch-quotes" disabled>Fetch quotes</button></form><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Last price</th><th>Change</th><th>Bid / ask</th></tr></thead><tbody id="market-quotes"><tr><td colspan="4" class="empty">Connect Webull to fetch quotes.</td></tr></tbody></table></div></article>
+        <article class="card chart-card"><div class="card-header"><div><h2>Historical prices</h2><p>Close-price chart and OHLCV bars</p></div><span id="chart-summary" class="subtle">No data loaded</span></div><form id="bars-form" class="market-toolbar"><label>Symbol<input id="bars-symbol" value="AAPL" maxlength="20" required></label><label>Interval<select id="bars-interval"><option value="M1">1 minute</option><option value="M5">5 minutes</option><option value="M15">15 minutes</option><option value="M60">1 hour</option><option value="D">Daily</option><option value="W">Weekly</option></select></label><label>Bars<input id="bars-count" type="number" value="60" min="1" max="1200" step="1" required></label><button class="button primary" id="fetch-bars" disabled>Fetch bars</button></form><div class="chart"><svg id="price-chart" viewBox="0 0 800 230" role="img" aria-label="Historical closing prices"><text x="400" y="120" text-anchor="middle" class="chart-label">Fetch bars to see the chart</text></svg></div><div class="table-wrap bars-table"><table><thead><tr><th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th></tr></thead><tbody id="bars"><tr><td colspan="6" class="empty">Historical data will appear here.</td></tr></tbody></table></div></article>
+      </section>
+
+      <section class="tab-panel" id="panel-activity" aria-label="Activity" hidden>
+        <article class="card"><div class="card-header"><div><h2>Broker history</h2><p>Read-only Webull history, including orders created outside this desk</p></div><button class="button secondary small" id="load-history" disabled>Load history</button></div><pre id="broker-history" class="json-output">No broker history loaded.</pre><div class="pagination"><button class="button secondary small" id="history-next" disabled>Next history page</button></div></article>
+        <article class="card"><div class="card-header"><div><h2>Audit trail</h2><p>Persistent events recorded by the trading system</p></div><button class="button secondary small" id="refresh-audit">Refresh events</button></div><div class="table-wrap"><table><thead><tr><th>Sequence</th><th>Time</th><th>Action</th><th>Details</th></tr></thead><tbody id="audit"><tr><td colspan="4" class="empty">No events loaded yet.</td></tr></tbody></table></div><div class="pagination"><button class="button secondary small" id="audit-next" disabled>Load next events</button></div></article>
+      </section>
+
+      <section class="tab-panel" id="panel-settings" aria-label="Settings" hidden>
+        <div class="settings-grid"><article class="card"><div class="card-header"><div><h2>Local configuration</h2><p>Loaded directly from your project’s .env file</p></div><span class="badge success">SERVER-SIDE</span></div><dl id="configuration" class="settings-list"></dl><div class="settings-note">No key entry or login is needed on this local dashboard. Webull secrets and the backend API key stay on the Python server. Edit <code>.env</code> locally and restart the server to apply changes.</div></article><article class="card"><div class="card-header"><div><h2>Risk limits</h2><p>Review these before enabling sandbox trading</p></div></div><dl id="risk-limits" class="settings-list"></dl></article></div>
+        <article class="card"><div class="card-header"><div><h2>Local order report</h2><p>Ledger counts, not a financial performance calculation</p></div></div><pre id="order-report" class="json-output">Loading…</pre></article>
+      </section>
+      <footer>Personal use · Sandbox is separate from the Webull app’s Paper Trading portfolio · <span id="last-refresh">Not refreshed yet</span></footer>
+    </main>
+  </div>
+
+  <dialog id="order-dialog" class="dialog order-dialog"><div class="dialog-header"><div><div class="eyebrow">ORDER DETAILS</div><h2 id="order-dialog-title">Order</h2></div><button class="icon-button" id="close-order" aria-label="Close order details">×</button></div><div id="order-detail" class="order-detail"></div><div id="order-warning" class="notification" hidden></div><div class="dialog-actions" id="order-actions"></div><div id="order-preview" class="preview-output" hidden></div><details><summary>Full order record</summary><pre id="order-json" class="json-output"></pre></details></dialog>
+  <dialog id="confirm-dialog" class="dialog"><div class="dialog-header"><h2 id="confirm-title">Confirm action</h2><button class="icon-button" id="close-confirm" aria-label="Close confirmation">×</button></div><p id="confirm-message"></p><label class="checkbox-label"><input id="confirm-check" type="checkbox"> <span id="confirm-check-label">I have reviewed this action.</span></label><div class="dialog-actions"><button class="button secondary" id="confirm-back">Go back</button><button class="button primary" id="confirm-action" disabled>Confirm</button></div></dialog>
+  <dialog id="modify-dialog" class="dialog"><div class="dialog-header"><h2>Modify sandbox order</h2><button class="icon-button" id="close-modify" aria-label="Close modification">×</button></div><p class="hint">This sends a replacement to Webull. Quantity is the new total, including any already filled shares.</p><form id="modify-form"><label>Total shares<input id="modify-quantity" type="number" min="1" step="1" required></label><label>Limit price (USD)<input id="modify-price" type="number" min="0.000001" step="0.000001" required></label><div class="dialog-actions"><button type="button" class="button secondary" id="modify-back">Go back</button><button class="button primary" type="submit">Send replacement</button></div></form></dialog>
+</body>
+</html>

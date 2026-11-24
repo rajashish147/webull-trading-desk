@@ -1,0 +1,12 @@
+.venv/
+.env
+.env.*
+!.env.example
+.webull_tokens/
+__pycache__/
+*.pyc
+*.log
+data/
+.pytest_cache/
+.ruff_cache/
+*.sqlite3*
