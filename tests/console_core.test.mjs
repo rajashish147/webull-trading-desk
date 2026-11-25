@@ -114,3 +114,11 @@ test("cURL export uses placeholders, never session/live credentials", () => {
   assert.equal(snippet.includes("private-query"), false); assert.equal(snippet.includes("private-header"), false);
   assert.equal(snippet.includes("<YOUR_LOCAL_BACKEND_KEY>"), true);
 });
+
+test("live strategy arming and manual evaluation require console review", () => {
+  for (const path of ["/v1/strategies/id/arm", "/v1/strategies/id/tick"]) {
+    const result = classifyRequest(buildRequest({...base, method: "POST", path, environment: "production"}), "production");
+    assert.equal(result.review, true);
+    assert.equal(result.phrase, "EXECUTE LIVE REQUEST");
+  }
+});

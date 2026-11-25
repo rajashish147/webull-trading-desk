@@ -8,6 +8,7 @@ from trading.broker import WebullGateway
 from trading.database import Database
 from trading.models import DomainError
 from trading.service import TradingService
+from trading.strategies import SumStrategyEngine
 
 
 @dataclass
@@ -16,6 +17,7 @@ class Profile:
     database: Database
     broker: object
     service: TradingService
+    strategies: SumStrategyEngine
 
 
 class ProfileManager:
@@ -31,7 +33,8 @@ class ProfileManager:
         for environment, child in configurations.items():
             database = Database(child.database, child.identity)
             broker = supplied.get(environment) or WebullGateway(child.broker)
-            self.profiles[environment] = Profile(child, database, broker, TradingService(child, database, broker))
+            service = TradingService(child, database, broker)
+            self.profiles[environment] = Profile(child, database, broker, service, SumStrategyEngine(service))
 
     @property
     def active(self):
@@ -85,8 +88,22 @@ class ProfileManager:
 
     def halt_all(self, reason):
         with self.lock:
+            # Revoke every in-memory authorization before touching any journal.
             for profile in self.profiles.values():
-                profile.service.set_halt(True, reason)
+                profile.service._arm_deadline = 0
+                profile.service._arm_nonce = ""
+                profile.service._approval_deadlines.clear()
+                profile.service._strategy_grants.clear()
+            failures = []
+            for profile in self.profiles.values():
+                try:
+                    profile.service.set_halt(True, reason)
+                    for strategy in profile.strategies.active():
+                        profile.strategies.pause(strategy["id"], reason)
+                except Exception:
+                    failures.append(profile.config.broker.environment)
+            if failures:
+                raise DomainError("halt_journal_failed", "All in-memory live/strategy authorizations were revoked, but a profile journal failed. Stop the server and review the database.", 503)
             return self.active.database.state("halt")
 
     def switch(self, request, expected):
@@ -101,6 +118,8 @@ class ProfileManager:
                 raise DomainError("profile_not_configured", "Fill the selected profile's App Key, App Secret and Account ID in .env and restart.")
             current, target = self.active, self.profiles[request.environment]
             for profile in (current, target):
+                if any(value > 0 for value in profile.database.reserved_shares().values()):
+                    raise DomainError("strategy_exposure_blocks_switch", "Strategy-owned holdings require recovery/release before switching profiles.")
                 if profile.database.orders(active=True):
                     raise DomainError("active_orders_block_switch", "Reconcile/cancel active or uncertain local orders before switching. Trading has been halted.")
                 if profile.broker.connected and profile.broker.open_orders():
@@ -113,4 +132,8 @@ class ProfileManager:
         with self.lock:
             for environment, profile in self.profiles.items():
                 if profile.broker.connected:
-                    profile.service.reconcile_active(2 if environment == "production" else 5)
+                    active = profile.strategies.active()
+                    if active:
+                        for strategy in active:
+                            profile.strategies.tick(strategy["id"])
+                    profile.service.reconcile_active(2 if environment == "production" else 5, exclude_strategy=bool(active))

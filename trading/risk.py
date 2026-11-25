@@ -60,7 +60,7 @@ class RiskEngine:
         except (RiskDataError, TypeError, AttributeError, KeyError) as exc:
             return {"ready": False, "violations": [str(exc) if isinstance(exc, RiskDataError) else "Invalid broker readiness schema."]}
 
-    def check(self, spec, ignore_id=None, ignore_halt=False, filled_quantity=Decimal(0)):
+    def check(self, spec, ignore_id=None, ignore_halt=False, filled_quantity=Decimal(0), strategy_id=None):
         violations = []
         limits = self.limits
         remaining = Decimal(spec.quantity) - filled_quantity
@@ -162,6 +162,7 @@ class RiskEngine:
                 elif order.get("symbol") == spec.symbol:
                     pending_sell += qty
             cost = max(remaining, Decimal(0)) * spec.limit_price * (1 + limits.fee_buffer)
+            reserved_strategy_shares = self.database.reserved_shares(exclude_strategy=strategy_id).get(spec.symbol, Decimal(0))
             if spec.side == "BUY":
                 if cost > cash - unreflected_buy:
                     violations.append("Insufficient settled cash/buying power including fee buffer.")
@@ -170,14 +171,15 @@ class RiskEngine:
                     violations.append("Maximum per-symbol gross exposure exceeded.")
                 if portfolio_value + pending_buy + added_exposure > limits.max_portfolio_exposure:
                     violations.append("Maximum portfolio gross exposure exceeded.")
-            elif remaining > held - pending_sell:
+            elif remaining > held - pending_sell - reserved_strategy_shares:
                 violations.append("Insufficient available shares; short selling is disabled.")
             metrics = {
                 "settled_buying_power": str(cash), "estimated_cost_with_buffer": str(cost),
                 "settlement_currency": "USD",
                 "cash_available_after_local_reservations": str(max(cash - unreflected_buy, Decimal(0))),
                 "current_portfolio_value": str(portfolio_value), "pending_buy_notional": str(pending_buy),
-                "available_symbol_shares": str(max(held - pending_sell, Decimal(0))),
+                "available_symbol_shares": str(max(held - pending_sell - reserved_strategy_shares, Decimal(0))),
+                "strategy_reserved_shares": str(reserved_strategy_shares),
                 "quote_price": str(reference), "quote_age_seconds": str(max(age, Decimal(0))),
                 "day_profit_loss": str(daily_pnl), "open_order_count": len(remote),
             }

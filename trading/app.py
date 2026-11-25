@@ -15,7 +15,7 @@ from fastapi.security import APIKeyHeader
 
 from trading.config import AppConfig
 from trading.database import now
-from trading.models import DomainError, EnvironmentRequest, HaltRequest, LiveApprovalRequest, LiveArmRequest, OrderSpec, ReplaceOrder, WatchlistRequest
+from trading.models import DomainError, EnvironmentRequest, HaltRequest, LiveApprovalRequest, LiveArmRequest, OrderSpec, ReplaceOrder, StrategyArmRequest, StrategyReleaseRequest, SumStrategySpec, WatchlistRequest
 from trading.profiles import ProfileManager
 from trading.safety import LiveConfirmation
 from trading.ui import LocalUI
@@ -48,7 +48,7 @@ def create_app(config=None, broker=None):
     async def worker():
         while not stop.is_set():
             try:
-                await asyncio.wait_for(stop.wait(), timeout=config.reconcile_interval)
+                await asyncio.wait_for(stop.wait(), timeout=min(config.reconcile_interval, config.strategy_poll_seconds))
             except asyncio.TimeoutError:
                 try:
                     await asyncio.to_thread(runtime.reconcile_connected)
@@ -71,7 +71,7 @@ def create_app(config=None, broker=None):
             runtime.stop()
 
     app = FastAPI(
-        title="Webull Trading API", version="2.0.0", lifespan=lifespan,
+        title="Webull Trading API", version="3.0.0", lifespan=lifespan,
         description="Personal sandbox/live cash-equity trading with isolated profiles and explicit live approvals.",
     )
     def bind_state():
@@ -115,7 +115,7 @@ def create_app(config=None, broker=None):
 
     @app.get("/health", tags=["System"])
     def health():
-        return {"status": "ok", "service": "webull-trading-api", "version": "2.0.0"}
+        return {"status": "ok", "service": "webull-trading-api", "version": "3.0.0"}
 
     auth = [Depends(authenticate)]
 
@@ -137,7 +137,9 @@ def create_app(config=None, broker=None):
             "configured_account_hint": selected.broker.account_id[-4:], "profiles": runtime.summary(),
             "account_fingerprint": selected.identity,
             "reconcile_interval_seconds": selected.reconcile_interval,
-            "execution_mode": "manual", "schema_version": 2,
+            "execution_mode": "manual_with_bounded_strategies", "schema_version": 3,
+            "live_strategies_configured": selected.enable_live_strategies,
+            "active_strategies": len(profile.strategies.active()),
             "configuration_source": ".env",
             "credentials_configured": bool(selected.broker.app_key and selected.broker.app_secret),
         }
@@ -316,6 +318,41 @@ def create_app(config=None, broker=None):
     def report(request: Request):
         with runtime.scope(request) as profile:
             return profile.database.report()
+
+    @app.get("/v1/strategies", dependencies=auth, tags=["Strategies"])
+    def strategies(request: Request):
+        with runtime.scope(request) as profile:
+            return {"data": [profile.strategies.get(item["id"]) for item in profile.database.strategies()]}
+
+    @app.post("/v1/strategies", status_code=201, dependencies=auth, tags=["Strategies"])
+    def create_strategy(body: SumStrategySpec, request: Request):
+        with runtime.scope(request, mutation=True) as profile:
+            return profile.strategies.create(body)
+
+    @app.get("/v1/strategies/{strategy_id}", dependencies=auth, tags=["Strategies"])
+    def strategy(strategy_id: str, request: Request):
+        with runtime.scope(request) as profile:
+            return profile.strategies.get(strategy_id)
+
+    @app.post("/v1/strategies/{strategy_id}/arm", dependencies=auth, tags=["Strategies"])
+    def arm_strategy(strategy_id: str, body: StrategyArmRequest, request: Request):
+        with runtime.scope(request, mutation=True) as profile:
+            return profile.strategies.arm(strategy_id, body.confirmation)
+
+    @app.post("/v1/strategies/{strategy_id}/pause", dependencies=auth, tags=["Strategies"])
+    def pause_strategy(strategy_id: str, request: Request):
+        with runtime.scope(request, mutation=True) as profile:
+            return profile.strategies.pause(strategy_id)
+
+    @app.post("/v1/strategies/{strategy_id}/tick", dependencies=auth, tags=["Strategies"])
+    def evaluate_strategy(strategy_id: str, request: Request):
+        with runtime.scope(request, mutation=True) as profile:
+            return profile.strategies.tick(strategy_id)
+
+    @app.post("/v1/strategies/{strategy_id}/release", dependencies=auth, tags=["Strategies"])
+    def release_strategy(strategy_id: str, body: StrategyReleaseRequest, request: Request):
+        with runtime.scope(request, mutation=True) as profile:
+            return profile.strategies.release(strategy_id)
 
     ui.mount(app)
     return app

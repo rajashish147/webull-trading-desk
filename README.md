@@ -26,6 +26,19 @@ History is redacted and memory-only. Live arming and one-use approvals are not b
 
 Read **[the API console guide](docs/API_CONSOLE.md)** before executing broker actions.
 
+## First strategy: two-stock sum
+
+Use **Strategies** for bounded automation: buy both equal quantities when the
+ask sum crosses to `Z` or below, then attempt to sell when the bid sum reaches
+`Z+a` or `Z-b`. Repeats require cooldown/fresh crossing and finite entry attempts.
+Failed/partial legs cancel remaining working orders while authorized, then halt
+for manual recovery; fills are not automatically reversed.
+
+Live automation is **separately disabled by default** and requires explicit
+policy/window authorization in addition to global live arming. This is not atomic
+pair execution, guaranteed profit/stop-loss, or proven production reliability.
+Read **[STRATEGIES.md](docs/STRATEGIES.md)** before arming it.
+
 ## Already running? Daily-use guide
 
 Read **[the dashboard user guide](docs/USER_GUIDE.md)** for the button-by-button
@@ -78,7 +91,8 @@ and App Secret are preserved. They are never bundled with the source code.
 - Use the **Profile** selector to choose sandbox/live. Switching halts all profiles
   and is blocked while active/uncertain orders exist. Stale tabs cannot retarget orders.
 - Live orders require `WEBULL_ENABLE_LIVE_TRADING=true`, an explicit temporary arm,
-  and per-order typed confirmation. Live cancellation remains available while disarmed.
+  and per-order typed confirmation for manual actions. Separately armed strategies
+  use a reviewed finite delegation. Manual live cancellation remains available while disarmed.
 
 Read [the complete API and operating guide](docs/API.md) before enabling trading.
 
@@ -101,14 +115,14 @@ its environment-variable override behavior.
 - API-key authentication, per-endpoint broker quotas, request IDs, single-process database ownership.
 - One-use live approvals bound to account, environment, order revision, operation,
   quantity and price; approvals expire after 60 seconds.
-- Automatic schema-1 backup/migration to schema 2 without discarding existing orders.
+- Automatic schema-1/2 backup/migration to schema 3 without discarding existing orders.
 
 ### Scope and limitations
 
-This is a **sandbox-first, optionally live manual execution backend**, not a production-certified
+This is a **sandbox-first, optionally live manual/bounded-strategy execution backend**, not a production-certified
 brokerage platform. It supports **whole-share LIMIT BUY/SELL orders, DAY/GTC, CORE
 session**, and a single Individual Cash account. Market/stop orders, fractional
-shares, shorting, options, strategy automation, backtesting, MQTT/gRPC streaming,
+shares, shorting, options, backtesting, MQTT/gRPC streaming,
 multi-user permissions, cloud deployment, and automated emergency liquidation
 are not included. Market data uses HTTP snapshots, not push streaming.
 

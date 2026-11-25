@@ -7,6 +7,7 @@
   <title>Webull Desk · Personal Trading</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/strategies.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -17,6 +18,7 @@
         <button class="nav-item active" data-tab="overview" aria-current="page"><span>◫</span> Overview</button>
         <button class="nav-item" data-tab="orders"><span>⇄</span> Orders</button>
         <button class="nav-item" data-tab="market"><span>↗</span> Market data</button>
+        <button class="nav-item" data-tab="strategies"><span>∑</span> Strategies</button>
         <button class="nav-item" data-tab="activity"><span>≡</span> Activity</button>
         <button class="nav-item" data-tab="settings"><span>⚙</span> Settings</button>
       </nav>
@@ -29,7 +31,7 @@
         <div class="header-actions"><label class="environment-picker">Profile<select id="environment-picker" disabled><option value="sandbox">Sandbox</option><option value="production" disabled>Live — configure .env</option></select></label><span class="chip" id="environment">Loading…</span><button class="button secondary" id="refresh-all">↻ Refresh</button></div>
       </header>
 
-      <div id="live-warning" class="notification error" hidden><strong>LIVE ACCOUNT · REAL MONEY</strong> — submissions and replacements require a time-limited live arm and an exact, one-use order confirmation. Expiry or halting does not cancel broker orders.</div>
+      <div id="live-warning" class="notification error" hidden><strong>LIVE ACCOUNT · REAL MONEY</strong> — manual orders require live arming and exact approvals. A separately armed strategy may trade autonomously within its reviewed window/policy. Halting or expiry does not close positions or cancel broker orders automatically.</div>
       <div id="notification" class="notification" role="status" aria-live="polite" hidden></div>
       <div class="connection-bar">
         <div><span class="status-dot muted" id="connection-dot"></span><strong id="connection-label">Not connected</strong><span id="account-label">Connect to load your account.</span></div>
@@ -78,6 +80,18 @@
         <article class="card chart-card"><div class="card-header"><div><h2>Historical prices</h2><p>Close-price chart and OHLCV bars</p></div><span id="chart-summary" class="subtle">No data loaded</span></div><form id="bars-form" class="market-toolbar"><label>Symbol<input id="bars-symbol" value="AAPL" maxlength="20" required></label><label>Interval<select id="bars-interval"><option value="M1">1 minute</option><option value="M5">5 minutes</option><option value="M15">15 minutes</option><option value="M60">1 hour</option><option value="D">Daily</option><option value="W">Weekly</option></select></label><label>Bars<input id="bars-count" type="number" value="60" min="1" max="1200" step="1" required></label><button class="button primary" id="fetch-bars" disabled>Fetch bars</button></form><div class="chart"><svg id="price-chart" viewBox="0 0 800 230" role="img" aria-label="Historical closing prices"><text x="400" y="120" text-anchor="middle" class="chart-label">Fetch bars to see the chart</text></svg></div><div class="table-wrap bars-table"><table><thead><tr><th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th></tr></thead><tbody id="bars"><tr><td colspan="6" class="empty">Historical data will appear here.</td></tr></tbody></table></div></article>
       </section>
 
+      <section class="tab-panel" id="panel-strategies" aria-label="Strategies" hidden>
+        <div class="notification info"><strong>Two-stock sum strategy</strong><br>Buy both on a fresh ask(A)+ask(B) crossing to Z or below. Attempt to sell both when bid(A)+bid(B) ≥ Z+a or ≤ Z−b. Two orders are not atomic: a failed/partial leg cancels remaining working orders while authorized, then halts for manual review. No guaranteed fill or profit.</div>
+        <article class="card"><div class="card-header"><div><h2>Create strategy</h2><p>Equal whole-share quantities · DAY limits · finite cycles and authorization window</p></div></div><form id="strategy-form" class="strategy-form">
+          <label>Name<input id="strategy-name" value="Two-stock sum" required maxlength="80"></label>
+          <div class="form-row"><label>Stock A<input id="strategy-a" value="AAPL" required></label><label>Stock B<input id="strategy-b" value="MSFT" required></label><label>Shares each<input id="strategy-qty" type="number" value="1" min="1" step="1" required></label></div>
+          <div class="form-row"><label>Entry sum Z<input id="strategy-z" type="number" min="0.000001" step="0.000001" required></label><label>Profit increment a<input id="strategy-profit" type="number" min="0.000001" step="0.000001" required></label><label>Downside delta b<input id="strategy-loss" type="number" min="0.000001" step="0.000001" required></label></div>
+          <div class="form-row"><label>Max pair budget (USD)<input id="strategy-budget" type="number" value="1000" min="1" step="0.01" required></label><label>Max entry attempts<input id="strategy-cycles" type="number" value="2" min="1" max="5" step="1" required></label><label>Cooldown seconds<input id="strategy-cooldown" type="number" value="60" min="30" max="3600" step="1" required></label></div>
+          <div class="form-row"><label>Leg timeout seconds<input id="strategy-timeout" type="number" value="30" min="10" max="120" step="1" required></label><label>Authorization seconds<input id="strategy-duration" type="number" value="300" min="30" max="600" step="1" required></label></div>
+          <button class="button primary" type="submit">Save disabled strategy</button><p class="hint">Saving does not arm or trade. Live automation requires TRADING_ENABLE_LIVE_STRATEGIES=true, a global live arm, and a separate typed strategy authorization. Existing global order/risk caps still apply.</p>
+        </form></article>
+        <article class="card"><div class="card-header"><div><h2>Strategy monitor</h2><p>Owned quantities derive only from linked fills; no tax-lot selection or auto reversal</p></div><button id="refresh-strategies" class="button secondary small">Refresh strategies</button></div><div id="strategy-list" class="strategy-list"><p class="empty">No strategies configured.</p></div></article>
+      </section>
       <section class="tab-panel" id="panel-activity" aria-label="Activity" hidden>
         <article class="card"><div class="card-header"><div><h2>Broker history</h2><p>Read-only Webull history, including orders created outside this desk</p></div><button class="button secondary small" id="load-history" disabled>Load history</button></div><pre id="broker-history" class="json-output">No broker history loaded.</pre><div class="pagination"><button class="button secondary small" id="history-next" disabled>Next history page</button></div></article>
         <article class="card"><div class="card-header"><div><h2>Audit trail</h2><p>Persistent events recorded by the trading system</p></div><button class="button secondary small" id="refresh-audit">Refresh events</button></div><div class="table-wrap"><table><thead><tr><th>Sequence</th><th>Time</th><th>Action</th><th>Details</th></tr></thead><tbody id="audit"><tr><td colspan="4" class="empty">No events loaded yet.</td></tr></tbody></table></div><div class="pagination"><button class="button secondary small" id="audit-next" disabled>Load next events</button></div></article>

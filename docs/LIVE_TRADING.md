@@ -1,5 +1,11 @@
 # Controlled live trading, with sandbox retained
 
+**Strategy automation is a separate opt-in.** The manual workflow below still
+requires per-order approvals. A strategy authorized with **ARM LIVE STRATEGY**
+may execute its own bounded buy/sell/cancel policy without per-order clicks while
+both its grant and global live arm are valid. Read [STRATEGIES.md](STRATEGIES.md)
+before enabling `TRADING_ENABLE_LIVE_STRATEGIES`; it remains false by default.
+
 Version 2 adds live execution for a **Webull US Individual Cash account**, while
 retaining a separate sandbox profile. It is a **personal, supervised, whole-share
 LIMIT BUY/SELL tool**, not a broker-certified or guaranteed production platform.
@@ -20,7 +26,7 @@ settlement, reliability, or financial performance.
 5. Live submission/replacement requires an explicit `.env` opt-in.
 6. Live arming requires a validated Cash account, complete USD account data, and
    the exact phrase **ENABLE LIVE TRADING**. The default window is 10 minutes.
-7. Every live submit/replace/cancel requires a **60-second, one-use approval** bound
+7. Every manual live submit/replace/cancel requires a **60-second, one-use approval** bound
    to the account, environment, order, operation, parameters, and order revision.
 8. The final action requires a typed acknowledgement. The SDK adapter also checks
    a short-lived exact-action execution permit before sending to Webull.
@@ -244,7 +250,7 @@ can read profile data but **cannot submit live orders**, even with its old flags
 
 ## Recovery, backup and limitations
 
-Schema 1 is backed up automatically before migration to schema 2; records keep
+Schema 1/2 is backed up automatically before migration to schema 3; records keep
 their IDs and gain account/environment scope. Interrupted broker mutations become
 UNKNOWN, and pending live approvals are invalidated. Do not delete ledgers to
 bypass uncertainty or silently move one account's ledger to another account.

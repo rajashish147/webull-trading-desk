@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 import json
 from pathlib import Path
 import sqlite3
@@ -43,12 +44,12 @@ class Database:
                 old_version = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
                 if old_identity and old_identity[0] != self.identity:
                     raise ValueError("Database belongs to another broker environment/account.")
-                if old_version and old_version[0] not in {"1", "2"}:
+                if old_version and old_version[0] not in {"1", "2", "3"}:
                     raise ValueError("Unsupported database schema version.")
-                if old_version and old_version[0] == "1":
+                if old_version and old_version[0] in {"1", "2"}:
                     backup_dir = self.path.parent / "backups"
                     backup_dir.mkdir(exist_ok=True)
-                    backup_path = backup_dir / f"{self.path.stem}_schema1_{uuid.uuid4().hex}.sqlite3"
+                    backup_path = backup_dir / f"{self.path.stem}_schema{old_version[0]}_{uuid.uuid4().hex}.sqlite3"
                     target = sqlite3.connect(backup_path)
                     try:
                         conn.backup(target)
@@ -72,15 +73,18 @@ class Database:
                     intent_hash TEXT NOT NULL, arm_nonce TEXT NOT NULL,
                     expires_at REAL NOT NULL, consumed INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS strategies (
+                    id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, record TEXT NOT NULL
+                );
             """)
             row = conn.execute("SELECT value FROM metadata WHERE key='identity'").fetchone()
             if row and row[0] != self.identity:
                 raise ValueError("Database belongs to another broker environment/account.")
             conn.execute("INSERT OR IGNORE INTO metadata VALUES ('identity', ?)", (self.identity,))
             row = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
-            if row and row[0] not in {"1", "2"}:
+            if row and row[0] not in {"1", "2", "3"}:
                 raise ValueError("Unsupported database schema version.")
-            conn.execute("INSERT OR REPLACE INTO metadata VALUES ('schema_version', '2')")
+            conn.execute("INSERT OR REPLACE INTO metadata VALUES ('schema_version', '3')")
             conn.execute("INSERT OR IGNORE INTO metadata VALUES ('watchlist', '[]')")
             conn.execute("INSERT OR REPLACE INTO metadata VALUES ('halt', ?)", (
                 json.dumps({"enabled": True, "reason": "Server startup: explicit trading enable required."}),
@@ -97,6 +101,12 @@ class Database:
                 record = json.loads(row[0])
                 record.update(state="UNKNOWN", last_error="Interrupted broker operation; reconciliation required.")
                 self._write(conn, record, "restart_recovery", {})
+            for row in conn.execute("SELECT record FROM strategies").fetchall():
+                strategy = json.loads(row[0])
+                if strategy["status"] in {"WAITING_ENTRY", "ENTERING", "HOLDING", "EXITING", "CLEANUP"}:
+                    strategy.update(status="RECOVERY_REQUIRED", expires_at=0, last_error="Server restarted; reconcile owned orders/holdings before resuming.")
+                    conn.execute("UPDATE strategies SET record=?,updated_at=? WHERE id=?", (json.dumps(strategy), now(), strategy["id"]))
+                    self._audit(conn, "strategy_restart_halt", None, {"strategy_id": strategy["id"]})
 
     @staticmethod
     def _audit(conn, action, order_id, details):
@@ -113,7 +123,7 @@ class Database:
             self._audit(conn, action, record["id"], details)
         return record
 
-    def create(self, spec, key):
+    def create(self, spec, key, tags=None):
         with self.transaction() as conn:
             row = conn.execute("SELECT record FROM orders WHERE idempotency_key=?", (key,)).fetchone()
             if row:
@@ -130,6 +140,7 @@ class Database:
                 "created_at": now(), "updated_at": now(), "last_reconciled_at": None,
                 "environment": self.identity.split(":", 1)[0], "account_fingerprint": self.identity,
             }
+            record.update(tags or {})
             conn.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?)", (
                 order_id, key, order_id, "DRAFT", record["created_at"], record["updated_at"], json.dumps(record),
             ))
@@ -206,6 +217,52 @@ class Database:
     def invalidate_approvals(self):
         with self.transaction() as conn:
             conn.execute("UPDATE live_approvals SET consumed=1 WHERE consumed=0")
+
+    def strategies(self):
+        with self.transaction() as conn:
+            return [json.loads(row[0]) for row in conn.execute("SELECT record FROM strategies ORDER BY created_at DESC").fetchall()]
+
+    def strategy(self, strategy_id):
+        with self.transaction() as conn:
+            row = conn.execute("SELECT record FROM strategies WHERE id=?", (strategy_id,)).fetchone()
+            if not row:
+                raise DomainError("strategy_not_found", "Strategy not found in this profile.", 404)
+            return json.loads(row[0])
+
+    def save_strategy(self, record, action):
+        record["updated_at"] = now()
+        with self.transaction() as conn:
+            conn.execute("INSERT INTO strategies VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,record=excluded.record",
+                         (record["id"], record["created_at"], record["updated_at"], json.dumps(record)))
+            if action:
+                self._audit(conn, action, None, {"strategy_id": record["id"], "status": record["status"], "cycle": record["cycle"]})
+        return record
+
+    def strategy_orders(self, strategy_id):
+        with self.transaction() as conn:
+            return [record for row in conn.execute("SELECT record FROM orders").fetchall()
+                    if (record := json.loads(row[0])).get("strategy_id") == strategy_id]
+
+    def strategy_owned(self, strategy_id):
+        result = {}
+        for order in self.strategy_orders(strategy_id):
+            symbol = order["spec"]["symbol"]
+            quantity = Decimal(order["filled_quantity"])
+            if not quantity.is_finite() or quantity < 0:
+                raise DomainError("invalid_strategy_allocation", "Invalid strategy fill allocation.")
+            result[symbol] = result.get(symbol, Decimal(0)) + (quantity if order["spec"]["side"] == "BUY" else -quantity)
+        if any(value < 0 for value in result.values()):
+            raise DomainError("invalid_strategy_allocation", "Strategy sell fills exceed its own buy fills.")
+        return result
+
+    def reserved_shares(self, exclude_strategy=None):
+        result = {}
+        for strategy in self.strategies():
+            if strategy["id"] == exclude_strategy or strategy["status"] == "RELEASED":
+                continue
+            for symbol, quantity in self.strategy_owned(strategy["id"]).items():
+                result[symbol] = result.get(symbol, Decimal(0)) + quantity
+        return result
 
     def report(self):
         with self.transaction() as conn:

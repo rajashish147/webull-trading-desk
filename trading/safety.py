@@ -30,3 +30,12 @@ class ExecutionPermit:
     client_order_id: str
     payload_hash: str
     expires_at: float
+
+
+@dataclass
+class StrategyGrant:
+    strategy_id: str
+    policy_hash: str
+    expires_at: float
+    deadline: float
+    used: set = field(default_factory=set, repr=False)

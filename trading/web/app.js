@@ -135,7 +135,7 @@ function setTab(tab) {
     item.classList.toggle("active", active);
     if (active) item.setAttribute("aria-current", "page"); else item.removeAttribute("aria-current");
   });
-  $("page-title").textContent = { overview: "Overview", orders: "Orders", market: "Market data", activity: "Activity", settings: "Settings" }[tab];
+  $("page-title").textContent = { overview: "Overview", orders: "Orders", market: "Market data", strategies: "Strategies", activity: "Activity", settings: "Settings" }[tab];
 }
 
 function renderSystem() {
@@ -152,7 +152,7 @@ function renderSystem() {
   $("enable-trading").classList.toggle("live-action", live);
   $("trading-status").textContent = live ? liveArmed() ? `LIVE ARMED · until ${new Date(system.live_arm_expires_at).toLocaleTimeString()}` : "LIVE DISARMED" : halted ? "Trading halted" : "Sandbox trading enabled";
   $("trading-status").className = "badge " + (live ? "danger" : halted ? "warning" : "success");
-  $("halt-description").textContent = live ? system.live_execution_configured ? "A live arm is time-limited. Every broker action needs an exact, one-use confirmation." : "Live execution is disabled in .env. Read-only connection and emergency cancellation are available." : halted ? "Drafts and previews are safe. Submissions and replacements are blocked." : "Order submissions still require your explicit confirmation. Halting does not cancel existing orders.";
+  $("halt-description").textContent = live ? system.live_execution_configured ? "Live arms are time-limited. Manual orders need approvals; strategies need separate bounded delegation." : "Live execution is disabled in .env. Read-only connection and emergency cancellation are available." : halted ? "Drafts and previews are safe. Submissions and replacements are blocked." : "Manual orders require confirmation. Separately armed strategies may execute automatically.";
   for (const profile of system.profiles || []) {
     const option = $("environment-picker").querySelector(`option[value="${profile.environment}"]`);
     option.disabled = !profile.configured;
@@ -169,6 +169,7 @@ function renderSystem() {
     "Browser access": "Automatic local session · no key entry",
     "Live execution opt-in": live ? system.live_execution_configured ? "Enabled in .env; arm/confirm required" : "Disabled in .env" : "Switch to live to inspect",
     "Live arm": live ? liveArmed() ? system.live_arm_expires_at : "Disarmed" : "Not applicable",
+    "Live strategy opt-in": system.live_strategies_configured ? "Enabled in .env; strategy arm still required" : "Disabled in .env",
     "Order reconciliation": `${system.reconcile_interval_seconds}s · read-only`,
   });
   updateControls();
@@ -457,7 +458,7 @@ async function refreshAll() {
   const oldIdentity = state.system?.account_fingerprint;
   acceptSystem(await api("/v1/system"));
   if (oldIdentity !== state.system.account_fingerprint) await loadProfilePreferences();
-  const reads = [loadOrders(), loadAudit(), api("/v1/reports/orders").then((result) => { $("order-report").textContent = JSON.stringify(result, null, 2); })];
+  const reads = [loadOrders(), loadAudit(), loadStrategies(), api("/v1/reports/orders").then((result) => { $("order-report").textContent = JSON.stringify(result, null, 2); })];
   if (state.system.connected) reads.push(loadPortfolio(), fetchQuotes());
   const outcomes = await Promise.allSettled(reads);
   $("last-refresh").textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -481,12 +482,12 @@ $("halt-trading").addEventListener("click", () => run(async () => {
 }, true));
 $("enable-trading").addEventListener("click", () => {
   const live = state.system.environment === "production";
-  confirmAction(live ? "Arm REAL-MONEY trading?" : "Enable sandbox trading?", live ? `Enable a short live-trading window for account …${state.system.configured_account_hint}. This does not place an order. Each broker action still requires its own one-use typed confirmation. Re-arming invalidates previous confirmations.` : "Allow explicit sandbox submissions and replacements. No order is placed by enabling trading.", live ? "Arm live trading" : "Enable sandbox trading", async acknowledgement => {
+  confirmAction(live ? "Arm REAL-MONEY trading?" : "Enable sandbox trading?", live ? `Enable a short live-trading window for account …${state.system.configured_account_hint}. This does not place an order. Manual actions require one-use approvals; strategies need a separate bounded delegation. Re-arming invalidates earlier authorizations.` : "Allow explicit sandbox submissions and replacements. No order is placed by enabling trading.", live ? "Arm live trading" : "Enable sandbox trading", async acknowledgement => {
   if (live) await api("/v1/live/arm", "POST", {confirmation: acknowledgement});
   else await api("/v1/risk/kill-switch", "PUT", { enabled: false, reason: "Personal dashboard reviewed sandbox session" });
   acceptSystem(await api("/v1/system"));
   if (state.selected && $("order-dialog").open) showOrder(state.selected);
-  notify(live ? "LIVE trading armed temporarily. Every action still requires exact, one-use confirmation." : "Sandbox trading enabled. Every order still needs a separate submission confirmation.", live ? "info" : "success");
+  notify(live ? "LIVE trading armed temporarily. Manual actions need approvals; strategy automation still requires separate arming." : "Sandbox trading enabled. Strategies still require a separate explicit arm.", live ? "info" : "success");
   }, live ? "ENABLE LIVE TRADING" : "");
 });
 
@@ -575,6 +576,61 @@ $("modify-form").addEventListener("submit", (event) => {
     $("modify-dialog").close(); await updateAfterMutation(order, "Replacement processed — check broker status");
   });
 });
+
+async function loadStrategies() {
+  const result = await api("/v1/strategies");
+  $("strategy-list").replaceChildren();
+  const running = ["WAITING_ENTRY", "ENTERING", "HOLDING", "EXITING", "CLEANUP"];
+  for (const strategy of result.data) {
+    const item = node("div", null, "strategy-item"), spec = strategy.spec;
+    item.append(node("h3", `${spec.name} · ${spec.symbol_a} + ${spec.symbol_b}`), badge(strategy.status));
+    item.append(node("p", `Entry Z: ${spec.entry_sum} · profit Z+a: ${Number(spec.entry_sum) + Number(spec.profit_increment)} · downside Z−b: ${Number(spec.entry_sum) - Number(spec.downside_delta)} · ${spec.quantity} shares each`));
+    item.append(node("p", `Last ask sum: ${strategy.last_ask_sum ?? "—"} · bid sum: ${strategy.last_bid_sum ?? "—"} · attempts ${strategy.cycles_started}/${spec.max_cycles} · completed ${strategy.cycles_completed} · owned ${JSON.stringify(strategy.owned)}`));
+    item.append(node("p", `Scope expires: ${strategy.expires_at ? new Date(strategy.expires_at * 1000).toLocaleString() : "not armed"}`));
+    if (strategy.last_error) item.append(node("p", strategy.last_error, "strategy-error"));
+    const actions = node("div", null, "inline-actions"), live = state.system.environment === "production";
+    const button = (label, callback, blocked = false, kind = "secondary") => {
+      const element = node("button", label, `button ${kind} small`);
+      element.dataset.blocked = String(blocked); element.addEventListener("click", callback); actions.append(element);
+    };
+    button(live ? "Arm LIVE automation" : "Arm sandbox strategy", () => {
+      const phrase = live ? "ARM LIVE STRATEGY" : "ARM SANDBOX STRATEGY";
+      confirmAction(live ? "Authorize bounded LIVE automation?" : "Authorize sandbox automation?",
+        `Account …${state.system.configured_account_hint}. This authorizes autonomous paired orders, NOT per-order manual approval.\n${JSON.stringify(spec, null, 2)}\nPartial/failed legs cancel remaining working orders while authorized, then halt; existing fills are not reversed. Scope expiry does not close positions.`,
+        "Arm strategy automation", async acknowledgement => {
+          await api(`/v1/strategies/${strategy.id}/arm`, "POST", {confirmation: acknowledgement});
+          await loadStrategies(); notify("Strategy armed within its finite policy/window. Monitor fills and exposure.", "info");
+        }, phrase);
+    }, !state.system.connected || running.includes(strategy.status) || ["COMPLETED", "RELEASED"].includes(strategy.status) || state.system.kill_switch.enabled || live && (!liveArmed() || !state.system.live_strategies_configured || !state.system.reconcile_interval_seconds), live ? "danger" : "primary");
+    button("Pause automation", () => run(async () => {
+      await api(`/v1/strategies/${strategy.id}/pause`, "POST"); await loadStrategies();
+      notify("Strategy paused. Working broker orders and filled holdings remain; inspect and manage explicitly.", "info");
+    }), !running.includes(strategy.status));
+    button("Evaluate once", () => confirmAction("Evaluate this armed strategy?", "This can dispatch orders within the already authorized strategy policy. It does not arm an inactive strategy.", "Evaluate once", async () => {
+      await api(`/v1/strategies/${strategy.id}/tick`, "POST"); await refreshAll();
+    }, live ? "EVALUATE LIVE STRATEGY" : ""), !running.includes(strategy.status));
+    button("Release to manual recovery", () => confirmAction("Release recorded holdings to manual management?", "This places NO trade. Pause and reconcile/cancel all linked orders first. Releasing removes the strategy's quantity reservation; you must manage the remaining shares manually. Released strategies cannot restart.", "Release holdings", async () => {
+      await api(`/v1/strategies/${strategy.id}/release`, "POST", {confirmation: "RELEASE STRATEGY HOLDINGS"}); await loadStrategies();
+    }, "RELEASE STRATEGY HOLDINGS"), running.includes(strategy.status) || strategy.status === "RELEASED" || !state.system.connected);
+    item.append(actions);
+    const details = node("details"); details.append(node("summary", "Strategy record and linked orders"), node("pre", JSON.stringify(strategy, null, 2), "json-output")); item.append(details);
+    $("strategy-list").append(item);
+  }
+  if (!result.data.length) $("strategy-list").append(node("p", "No strategies configured. Saving creates a disabled strategy; it never trades by itself.", "empty"));
+  updateControls();
+}
+
+$("strategy-form").addEventListener("submit", event => {
+  event.preventDefault(); run(async () => {
+    const spec = {name: $("strategy-name").value, symbol_a: $("strategy-a").value.trim().toUpperCase(), symbol_b: $("strategy-b").value.trim().toUpperCase(),
+      quantity: Number($("strategy-qty").value), entry_sum: $("strategy-z").value, profit_increment: $("strategy-profit").value,
+      downside_delta: $("strategy-loss").value, max_pair_notional: $("strategy-budget").value, max_cycles: Number($("strategy-cycles").value),
+      cooldown_seconds: Number($("strategy-cooldown").value), order_timeout_seconds: Number($("strategy-timeout").value), duration_seconds: Number($("strategy-duration").value)};
+    await api("/v1/strategies", "POST", spec); await loadStrategies();
+    notify("Disabled strategy saved. No order placed; a separate explicit automation arm is required.", "success");
+  });
+});
+$("refresh-strategies").addEventListener("click", () => run(loadStrategies));
 
 async function boot() {
   updateControls();

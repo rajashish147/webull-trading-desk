@@ -1,5 +1,9 @@
 # API and operations guide
 
+Version 3 adds bounded two-stock sum strategies. See [STRATEGIES.md](STRATEGIES.md)
+for their distinct authorization, ownership and non-atomic failure policy. Manual
+live order approvals remain mandatory; strategy delegation is a separate opt-in.
+
 ## Personal dashboard
 
 Run `python manage.py serve` and open **http://127.0.0.1:8000**. The dashboard uses
@@ -120,6 +124,12 @@ API key is entered into or sent to the browser.
 | POST | `/v1/reconcile` | Reconcile up to five sandbox / two live active local orders |
 | GET | `/v1/audit?after=0&limit=100` | Cursor-paginated audit events |
 | GET | `/v1/reports/orders` | Local order counts and UTC submission attempts |
+| GET / POST | `/v1/strategies` | List / save disabled sum strategies |
+| GET | `/v1/strategies/{id}` | Inspect policy, state, ownership and linked orders |
+| POST | `/v1/strategies/{id}/arm` | Typed finite strategy delegation |
+| POST | `/v1/strategies/{id}/pause` | Stop future automated orders, not existing exposure |
+| POST | `/v1/strategies/{id}/tick` | Evaluate an already armed strategy; can dispatch |
+| POST | `/v1/strategies/{id}/release` | Explicit recovery allocation release; no trade |
 
 The local watchlist is not synced to the Webull app. Financial P&L comes from broker
 portfolio responses; local reports do not fabricate returns, fees, or realized P&L.
@@ -298,9 +308,9 @@ To restore, stop the server and use a verified backup matching the same broker
 environment/account; reconcile against broker activity before explicitly enabling
 trading. Do not delete a ledger to bypass an unresolved mutation.
 
-Schema 1 is backed up automatically before migration to schema 2; order records
+Schema 1/2 is backed up automatically before migration to schema 3; order records
 are preserved and bound to their account/environment. No automatic audit retention,
-encryption, migrations beyond the supported 1→2 upgrade, disaster-
+encryption, migrations beyond the supported 1/2→3 upgrade, disaster-
 recovery orchestration, distributed execution, or production compliance tooling
 is implemented. Review those before considering any future live deployment.
 

@@ -70,8 +70,8 @@ export function safeBuilder(value) {
 
 export function classifyRequest(request, activeEnvironment) {
   const {method, path, parsedBody} = request;
-  const broker = method === "POST" && /^\/v1\/orders\/[^/]+\/(submit|cancel)$/.test(path) || method === "PATCH" && /^\/v1\/orders\/[^/]+$/.test(path);
-  const arm = method === "POST" && path === "/v1/live/arm";
+  const broker = method === "POST" && (/^\/v1\/orders\/[^/]+\/(submit|cancel)$/.test(path) || /^\/v1\/strategies\/[^/]+\/tick$/.test(path)) || method === "PATCH" && /^\/v1\/orders\/[^/]+$/.test(path);
+  const arm = method === "POST" && (path === "/v1/live/arm" || /^\/v1\/strategies\/[^/]+\/arm$/.test(path));
   const switchingLive = method === "PUT" && path === "/v1/environment" && parsedBody?.environment === "production";
   const globalHalt = method === "PUT" && path === "/v1/risk/kill-switch" && parsedBody?.enabled === true;
   const live = request.environment === "production" || activeEnvironment === "production";

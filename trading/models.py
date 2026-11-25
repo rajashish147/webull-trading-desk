@@ -85,6 +85,42 @@ class LiveApprovalRequest(StrictModel):
         return self
 
 
+class SumStrategySpec(StrictModel):
+    name: Annotated[str, Field(min_length=1, max_length=80)]
+    symbol_a: Symbol
+    symbol_b: Symbol
+    quantity: Annotated[int, Field(gt=0, le=100000, strict=True)] = 1
+    entry_sum: Price
+    profit_increment: Price
+    downside_delta: Price
+    max_pair_notional: Price = Decimal(1000)
+    max_cycles: Annotated[int, Field(ge=1, le=5, strict=True)] = 2
+    cooldown_seconds: Annotated[int, Field(ge=30, le=3600, strict=True)] = 60
+    order_timeout_seconds: Annotated[int, Field(ge=10, le=120, strict=True)] = 30
+    duration_seconds: Annotated[int, Field(ge=30, le=600, strict=True)] = 300
+
+    @field_validator("symbol_a", "symbol_b", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value):
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_pair(self):
+        if self.symbol_a == self.symbol_b:
+            raise ValueError("Choose two different stocks.")
+        if self.downside_delta >= self.entry_sum:
+            raise ValueError("Downside delta must be smaller than Z.")
+        return self
+
+
+class StrategyArmRequest(StrictModel):
+    confirmation: Literal["ARM SANDBOX STRATEGY", "ARM LIVE STRATEGY"]
+
+
+class StrategyReleaseRequest(StrictModel):
+    confirmation: Literal["RELEASE STRATEGY HOLDINGS"]
+
+
 class DomainError(Exception):
     def __init__(self, code, message, status=409, details=None):
         super().__init__(message)

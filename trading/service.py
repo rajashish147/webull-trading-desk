@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from trading.database import now
 from trading.models import BrokerError, DomainError, OrderSpec, ReplaceOrder, TERMINAL
 from trading.risk import RiskEngine, number
-from trading.safety import ExecutionPermit, LIVE_PHRASES, LiveConfirmation, digest, revision
+from trading.safety import ExecutionPermit, LIVE_PHRASES, LiveConfirmation, StrategyGrant, digest, revision
 
 
 def broker_number(value, name):
@@ -30,6 +30,7 @@ class TradingService:
         self._arm_deadline = 0
         self._arm_nonce = ""
         self._approval_deadlines = {}
+        self._strategy_grants = {}
 
     def _writable(self, operation="SUBMIT"):
         if not self.broker.connected:
@@ -172,26 +173,64 @@ class TradingService:
             self.database.audit_event("order_previewed", order_id, {"allowed": risk["allowed"]})
             return result
 
-    def _risk_gate(self, spec, order_id=None, filled_quantity=Decimal(0)):
-        result = self.risk.check(spec, ignore_id=order_id, filled_quantity=filled_quantity)
+    def _risk_gate(self, spec, order_id=None, filled_quantity=Decimal(0), strategy_id=None):
+        result = self.risk.check(spec, ignore_id=order_id, filled_quantity=filled_quantity, strategy_id=strategy_id)
         if not result["allowed"]:
             self.database.audit_event("risk_rejected", order_id, result)
             raise DomainError("risk_rejected", "Order failed pre-trade risk checks.", details=result)
         return result
 
-    def submit(self, order_id, confirmation=None):
+    def strategy_grant_valid(self, grant):
+        return bool(isinstance(grant, StrategyGrant) and self._strategy_grants.get(grant.strategy_id) is grant
+                    and grant.expires_at > time.time() and grant.deadline > time.monotonic()
+                    and not self.database.state("halt")["enabled"]
+                    and (self.config.broker.environment == "sandbox" or
+                         self.config.enable_live_strategies and self.live_armed()))
+
+    def _strategy_permit(self, record, operation, grant):
+        if not self.strategy_grant_valid(grant) or record.get("strategy_id") != grant.strategy_id:
+            raise DomainError("strategy_not_authorized", "Strategy authorization expired, was halted, or does not own this order.")
+        strategy = self.database.strategy(grant.strategy_id)
+        if strategy["account_fingerprint"] != self.config.identity or digest(strategy["spec"]) != grant.policy_hash or record.get("strategy_cycle") != strategy["cycle"]:
+            raise DomainError("strategy_scope_mismatch", "Strategy policy/account/cycle changed.")
+        key = (operation, record["id"])
+        if key in grant.used:
+            raise DomainError("strategy_action_used", "This strategy action was already dispatched; reconcile rather than retrying.")
+        if operation == "SUBMIT":
+            expected = (strategy.get("intent") or {}).get("specs", {}).get(record["spec"]["symbol"])
+            if expected != record["spec"] or strategy["status"] not in {"ENTERING", "EXITING"} or (strategy.get("intent") or {}).get("deadline", 0) <= time.time():
+                raise DomainError("strategy_intent_mismatch", "Order does not match the recorded paired strategy intent.")
+            if record["spec"]["side"] == "SELL" and Decimal(record["spec"]["quantity"]) > self.database.strategy_owned(grant.strategy_id).get(record["spec"]["symbol"], Decimal(0)):
+                raise DomainError("strategy_ownership", "Strategy cannot sell shares beyond its own fills.")
+            payload = OrderSpec.model_validate(record["spec"]).payload(record["client_order_id"])
+        else:
+            payload = {"client_order_id": record["client_order_id"]}
+        grant.used.add(key)
+        self.database.audit_event("strategy_action_authorized", record["id"], {"strategy_id": grant.strategy_id, "operation": operation, "cycle": strategy["cycle"]})
+        if self.config.broker.environment == "sandbox":
+            return None
+        return ExecutionPermit("production", self.config.broker.account_id, operation, record["client_order_id"], digest(payload), min(grant.expires_at, time.time() + 10))
+
+    def _manual_strategy_guard(self, record, grant=None):
+        if record.get("strategy_id") and grant is None:
+            strategy = self.database.strategy(record["strategy_id"])
+            if strategy["status"] in {"WAITING_ENTRY", "ENTERING", "HOLDING", "EXITING", "CLEANUP"}:
+                raise DomainError("strategy_managed_order", "Pause this strategy before manually mutating its orders.")
+
+    def submit(self, order_id, confirmation=None, _strategy_grant=None):
         with self.lock:
             record = self._record(order_id)
             # Retrying a submit HTTP request never submits this order a second time.
             if record["state"] != "DRAFT":
                 return record
+            self._manual_strategy_guard(record, _strategy_grant)
             self._writable()
             spec = OrderSpec.model_validate(record["spec"])
-            risk = self._risk_gate(spec, order_id)
+            risk = self._risk_gate(spec, order_id, strategy_id=record.get("strategy_id") if _strategy_grant else None)
             if self.config.broker.environment == "production":
                 self._broker_preview(spec, record, risk)
                 self._writable()
-            permit = self._permit(record, "SUBMIT", spec, confirmation)
+            permit = self._strategy_permit(record, "SUBMIT", _strategy_grant) if _strategy_grant else self._permit(record, "SUBMIT", spec, confirmation)
             self.database.update(order_id, {
                 "state": "SUBMITTING", "pending_action": "SUBMIT", "last_error": None,
             }, "submit_sent", {"spec": record["spec"]})
@@ -301,6 +340,7 @@ class TradingService:
         with self.lock:
             self._writable()
             record = self._record(order_id)
+            self._manual_strategy_guard(record)
             if record["pending_action"]:
                 raise DomainError("pending_mutation", "Reconcile the pending operation before replacing.")
             record = self.reconcile(order_id)
@@ -335,20 +375,21 @@ class TradingService:
             "last_error": str(error),
         }, action.lower() + "_failed", {"definitive": definitive})
 
-    def cancel(self, order_id, confirmation=None):
+    def cancel(self, order_id, confirmation=None, _strategy_grant=None):
         with self.lock:
             self._writable("CANCEL")
             record = self._record(order_id)
+            self._manual_strategy_guard(record, _strategy_grant)
             if record["state"] in TERMINAL or record["pending_action"] == "CANCEL":
                 return record
             if record["state"] == "DRAFT":
                 return self.database.update(order_id, {"state": "CANCELLED"}, "draft_cancelled")
-            record = self.reconcile(order_id)
+            record = record if _strategy_grant else self.reconcile(order_id)
             if record["state"] in TERMINAL:
                 return record
             if record["pending_action"]:
                 raise DomainError("pending_mutation", "Reconcile the previous broker mutation before cancelling.")
-            permit = self._permit(record, "CANCEL", None, confirmation)
+            permit = self._strategy_permit(record, "CANCEL", _strategy_grant) if _strategy_grant else self._permit(record, "CANCEL", None, confirmation)
             # Emergency cancellation remains available while the kill switch is enabled.
             self.database.update(order_id, {
                 "state": "CANCELLING", "pending_action": "CANCEL", "last_error": None,
@@ -361,12 +402,13 @@ class TradingService:
                 return self._mutation_error(record, exc, "CANCEL")
             except Exception:
                 return self._mutation_error(record, BrokerError("Cancellation outcome is uncertain."), "CANCEL")
-            return self._reconcile_or_record_error(order_id)
+            return self.database.get(order_id) if _strategy_grant else self._reconcile_or_record_error(order_id)
 
-    def reconcile_active(self, limit=5):
+    def reconcile_active(self, limit=5, exclude_strategy=False):
         with self.lock:
             results = []
-            for record in self.database.orders(active=True)[:limit]:
+            records = [record for record in self.database.orders(active=True) if not exclude_strategy or not record.get("strategy_id")]
+            for record in records[:limit]:
                 try:
                     results.append(self.reconcile(record["id"]))
                 except Exception:
@@ -387,6 +429,7 @@ class TradingService:
                 self._arm_deadline = 0
                 self._arm_nonce = ""
                 self._approval_deadlines.clear()
+                self._strategy_grants.clear()
                 self.database.invalidate_approvals()
                 self.database.set_state("live_arm", {"armed": False, "expires_at": 0}, "live_disarmed")
             return self.database.set_state("halt", {"enabled": enabled, "reason": reason, "updated_at": now()}, "kill_switch_changed")

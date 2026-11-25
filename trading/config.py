@@ -60,6 +60,9 @@ class AppConfig:
     request_limit: int = 120
     live_arm_seconds: int = 600
     profiles: dict = field(default_factory=dict, repr=False)
+    enable_live_strategies: bool = False
+    strategy_max_pair_notional: Decimal = Decimal(1000)
+    strategy_poll_seconds: int = 5
 
     def __post_init__(self):
         if len(self.api_key) < 32:
@@ -70,6 +73,8 @@ class AppConfig:
             raise ValueError("Invalid server timing/rate configuration.")
         if not 30 <= self.live_arm_seconds <= 1800:
             raise ValueError("Live arming duration must be between 30 and 1800 seconds.")
+        if not self.strategy_max_pair_notional.is_finite() or self.strategy_max_pair_notional <= 0 or self.strategy_poll_seconds < 5:
+            raise ValueError("Invalid strategy budget/poll settings.")
 
     @property
     def identity(self):
@@ -83,6 +88,9 @@ class AppConfig:
         if active not in {"sandbox", "production"}:
             raise ValueError("WEBULL_ENV must be sandbox or production.")
         profiles = {}
+        strategy_flag = (values.get("TRADING_ENABLE_LIVE_STRATEGIES") or "false").strip().lower()
+        if strategy_flag not in {"true", "false"}:
+            raise ValueError("TRADING_ENABLE_LIVE_STRATEGIES must be true or false.")
         for environment in ("sandbox", "production"):
             broker = profile_settings(values, environment)
             if not all((broker.app_key, broker.app_secret, broker.account_id)):
@@ -99,6 +107,9 @@ class AppConfig:
                 database=ROOT / "data" / f"{environment}_{fingerprint}.sqlite3", limits=limits,
                 reconcile_interval=int(values.get("TRADING_RECONCILE_INTERVAL") or "15"),
                 live_arm_seconds=int(values.get("TRADING_LIVE_ARM_SECONDS") or "600"),
+                enable_live_strategies=strategy_flag == "true",
+                strategy_max_pair_notional=Decimal(values.get("TRADING_STRATEGY_MAX_PAIR_NOTIONAL") or "1000"),
+                strategy_poll_seconds=int(values.get("TRADING_STRATEGY_POLL_SECONDS") or "5"),
             )
         if len(profiles) == 2:
             sandbox, live = profiles["sandbox"].broker, profiles["production"].broker
