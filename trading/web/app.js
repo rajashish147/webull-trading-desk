@@ -1,4 +1,5 @@
 "use strict";
+import {calculateStrategyPreview, normalizedSymbols} from "./strategy-preview.mjs";
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -6,6 +7,8 @@ const state = {
   selected: null, watchlist: ["AAPL", "MSFT"], quotes: [], auditAfter: 0,
   auditHasNext: false, historyKey: null, confirm: null, desynced: false,
 };
+const strategyPrice = {quotes: [], identity: null, connected: false, loading: false, timer: null,
+  generation: 0, lastRequest: 0, receivedAt: 0, backoffUntil: 0, error: "", limits: {}, preview: null, quoteVersion: 0};
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? "—" :
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(value));
 const price = (value) => value == null || !Number.isFinite(Number(value)) ? "—" :
@@ -62,6 +65,7 @@ function resetProfileUI() {
   closeDialogs();
   state.orders = []; state.quotes = []; state.orderOffset = 0; state.auditAfter = 0;
   state.auditHasNext = false; state.historyKey = null;
+  $("strategy-form").reset(); $("strategy-list").replaceChildren(); resetStrategyPrices();
   $("ticket-form").reset(); $("ticket-price").value = ""; $("risk-result").hidden = true;
   for (const id of ["cash-value", "buying-power", "portfolio-value", "day-pnl"]) $(id).textContent = "—";
   tableEmpty($("positions"), 4, "Connect this profile to load its positions.");
@@ -120,6 +124,8 @@ function updateControls() {
   $("orders-next").disabled = !ready || busy || state.orders.length < state.orderLimit;
   $("audit-next").disabled = !ready || busy || !state.auditHasNext;
   $("history-next").disabled = !ready || busy || !connected || !state.historyKey;
+  $("strategy-refresh-prices").disabled = !ready || busy || !connected || strategyPrice.loading || Date.now() < strategyPrice.backoffUntil;
+  $("strategy-use-current-z").disabled = !ready || busy || !strategyPrice.preview?.fresh;
   const confirmation = state.confirm;
   const phraseMatches = !confirmation?.phrase || $("confirm-phrase").value.trim() === confirmation.phrase;
   const validExpiry = !confirmation?.expiresAt || Date.parse(confirmation.expiresAt) > Date.now();
@@ -136,10 +142,16 @@ function setTab(tab) {
     if (active) item.setAttribute("aria-current", "page"); else item.removeAttribute("aria-current");
   });
   $("page-title").textContent = { overview: "Overview", orders: "Orders", market: "Market data", strategies: "Strategies", activity: "Activity", settings: "Settings" }[tab];
+  if (tab === "strategies") scheduleStrategyPrices();
 }
 
 function renderSystem() {
   const system = state.system, connected = Boolean(system.connected), live = system.environment === "production";
+  const newlyConnected = connected && (!strategyPrice.connected || strategyPrice.identity !== system.account_fingerprint);
+  if (strategyPrice.identity !== system.account_fingerprint) {
+    resetStrategyPrices(); strategyPrice.identity = system.account_fingerprint;
+  }
+  strategyPrice.connected = connected;
   const halted = live ? !liveArmed() : system.kill_switch.enabled;
   $("environment").textContent = live ? "LIVE · REAL MONEY" : "SANDBOX";
   $("environment").classList.toggle("production", system.environment !== "sandbox");
@@ -173,6 +185,8 @@ function renderSystem() {
     "Order reconciliation": `${system.reconcile_interval_seconds}s · read-only`,
   });
   updateControls();
+  if (newlyConnected && !$("panel-strategies").hidden) scheduleStrategyPrices();
+  renderStrategyPricePreview();
 }
 
 function renderList(target, values) {
@@ -384,7 +398,9 @@ async function loadProfilePreferences() {
   state.watchlist = watchlist.symbols.length ? watchlist.symbols : ["AAPL", "MSFT"];
   $("watchlist-symbols").value = state.watchlist.join(", ");
   const risk = await api("/v1/risk");
+  strategyPrice.limits = risk.limits;
   renderList($("risk-limits"), Object.fromEntries(Object.entries(risk.limits).map(([key, value]) => [key.replaceAll("_", " "), value])));
+  renderStrategyPricePreview();
 }
 
 async function submitSelected() {
@@ -577,6 +593,117 @@ $("modify-form").addEventListener("submit", (event) => {
   });
 });
 
+function resetStrategyPrices() {
+  clearTimeout(strategyPrice.timer);
+  strategyPrice.generation += 1;
+  strategyPrice.quotes = []; strategyPrice.receivedAt = 0; strategyPrice.identity = null;
+  strategyPrice.error = ""; strategyPrice.limits = {}; strategyPrice.preview = null;
+  strategyPrice.backoffUntil = 0;
+  strategyPrice.quoteVersion = 0;
+  renderStrategyPricePreview();
+}
+
+function renderStrategyPricePreview() {
+  const preview = calculateStrategyPreview({symbolA: $("strategy-a").value, symbolB: $("strategy-b").value,
+    quantity: $("strategy-qty").value, z: $("strategy-z").value, profit: $("strategy-profit").value,
+    downside: $("strategy-loss").value, budget: $("strategy-budget").value, cycles: $("strategy-cycles").value,
+    quotes: strategyPrice.quotes, feeBuffer: strategyPrice.limits.fee_buffer, limits: strategyPrice.limits});
+  strategyPrice.preview = preview;
+  const format = value => value == null ? "—" : new Intl.NumberFormat("en-US", {style: "currency", currency: "USD", maximumFractionDigits: 6}).format(value);
+  $("strategy-input-quotes").replaceChildren();
+  for (const quote of preview.rows) {
+    if (!quote.symbol) continue;
+    const row = node("tr");
+    row.append(node("td", quote.symbol), node("td", format(quote.last)), node("td", format(quote.bid)), node("td", format(quote.ask)),
+      node("td", quote.age == null ? "Not loaded" : `${Math.max(0, Math.floor(quote.age))}s · ${quote.market}`, quote.fresh ? "positive" : "negative"));
+    $("strategy-input-quotes").append(row);
+  }
+  if (!$("strategy-input-quotes").children.length) tableEmpty($("strategy-input-quotes"), 5, "Enter stock symbols to load quotes.");
+  for (const [id, value] of Object.entries({"strategy-ask-sum": preview.askSum, "strategy-bid-sum": preview.bidSum,
+    "strategy-current-cost": preview.cost, "strategy-buffered-cost": preview.bufferedCost})) {
+    $(id).textContent = format(value); $(id).classList.toggle("stale", !preview.fresh);
+  }
+  const hints = [];
+  if (preview.entryGap != null) hints.push(preview.entryGap > 0 ? `Ask sum is ${format(preview.entryGap)} above entry Z.` : "Ask sum is at/below Z. A newly armed strategy still waits for a fresh above-to-below crossing.");
+  if (preview.target != null) hints.push(`Profit threshold Z+a: ${format(preview.target)} · ${preview.targetGap == null ? "fetch both quotes to see the gap" : preview.targetGap > 0 ? `bid sum needs ${format(preview.targetGap)} more` : "bid sum is at/above target (preview only)"}.`);
+  if (preview.stop != null) hints.push(`Downside threshold Z−b: ${format(preview.stop)} · ${preview.downsideGap == null ? "fetch both quotes to see the gap" : preview.downsideGap > 0 ? `bid sum is ${format(preview.downsideGap)} above it` : "bid sum is at/below downside level (not a guaranteed exit)"}.`);
+  if (preview.grossTargetDifference != null) hints.push(`Theoretical gross difference at a: ${format(preview.grossTargetDifference)}; at b: ${format(preview.grossDownsideDifference)}. Not net P&L or a guarantee.`);
+  if (preview.spreadCost != null) hints.push(`Current two-stock spread × shares: ${format(preview.spreadCost)}. Current bid-side position estimate: ${format(preview.liquidationValue)}.`);
+  $("strategy-threshold-hints").textContent = hints.length ? hints.join("\n") : "Enter Z, a, b and shares to see threshold distances and share-adjusted estimates. No field change arms or submits an order.";
+  const warnings = preview.warnings.filter(message => strategyPrice.quotes.length || !message.includes("quote"));
+  $("strategy-preview-warnings").hidden = !warnings.length;
+  $("strategy-preview-warnings").textContent = warnings.join("\n");
+  const status = $("strategy-price-status");
+  status.dataset.quoteVersion = String(strategyPrice.quoteVersion);
+  status.classList.toggle("error", Boolean(strategyPrice.error));
+  status.textContent = strategyPrice.error || (!state.system?.connected ? "Connect Webull to fetch the entered stocks." : strategyPrice.loading ? "Fetching entered stocks… estimates remain display-only." : strategyPrice.receivedAt ? `Fetched ${new Date(strategyPrice.receivedAt).toLocaleTimeString()} · ${preview.fresh ? "fresh coherent snapshot" : "stale/incomplete/non-regular-hours; not a valid strategy signal"} · no orders placed.` : "Quotes load after valid symbols/shares are entered, with debounce and quota protection.");
+  $("strategy-use-current-z").disabled = !state.csrf || state.busy > 0 || !preview.fresh;
+}
+
+function canFetchStrategyPrices() {
+  return Boolean(state.csrf && state.system?.connected && !state.desynced && !state.busy &&
+    !document.hidden && !$("panel-strategies").hidden && normalizedSymbols($("strategy-a").value, $("strategy-b").value).symbols.length);
+}
+
+function scheduleStrategyPrices(force = false) {
+  if (!force && !$("strategy-auto-prices").checked) return;
+  clearTimeout(strategyPrice.timer);
+  if (!canFetchStrategyPrices()) {renderStrategyPricePreview(); return;}
+  const delay = Math.max(force ? 0 : 800, 5000 - (Date.now() - strategyPrice.lastRequest), strategyPrice.backoffUntil - Date.now());
+  strategyPrice.timer = setTimeout(() => {strategyPrice.timer = null; fetchStrategyPrices();}, Math.max(0, delay));
+}
+
+async function fetchStrategyPrices() {
+  if (!canFetchStrategyPrices() || Date.now() < strategyPrice.backoffUntil) return;
+  if (strategyPrice.loading) {strategyPrice.queued = true; return;}
+  if (Date.now() - strategyPrice.lastRequest < 5000) {scheduleStrategyPrices(); return;}
+  const {symbols} = normalizedSymbols($("strategy-a").value, $("strategy-b").value);
+  const identity = state.system.account_fingerprint, environment = state.system.environment, generation = strategyPrice.generation;
+  strategyPrice.lastRequest = Date.now(); strategyPrice.loading = true; strategyPrice.error = "";
+  renderStrategyPricePreview(); updateControls();
+  try {
+    const response = await fetch(`/v1/market/quotes?symbols=${encodeURIComponent(symbols.join(","))}`,
+      {credentials: "same-origin", headers: {"X-CSRF-Token": state.csrf, "X-Trading-Environment": environment}, redirect: "error"});
+    const data = await response.json().catch(() => ({}));
+    if (identity !== state.system?.account_fingerprint || generation !== strategyPrice.generation) return;
+    if (!response.ok) {
+      if (response.status === 429) strategyPrice.backoffUntil = Date.now() + 60000;
+      if ([401, 403, 409].includes(response.status)) strategyPrice.backoffUntil = Date.now() + 60000;
+      throw new Error(response.status === 429 ? "Quote quota reached. Auto-fetch backs off for 60 seconds; refresh later." : data.error?.message || data.detail || `Quote request failed (${response.status}).`);
+    }
+    if (!Array.isArray(data)) throw new Error("Unexpected quote response; no price estimates updated.");
+    strategyPrice.quotes = data; strategyPrice.receivedAt = Date.now(); strategyPrice.quoteVersion += 1;
+  } catch (error) {
+    if (identity === state.system?.account_fingerprint && generation === strategyPrice.generation) strategyPrice.error = error.message;
+  } finally {
+    strategyPrice.loading = false; renderStrategyPricePreview(); updateControls();
+    if (strategyPrice.queued) {strategyPrice.queued = false; scheduleStrategyPrices();}
+  }
+}
+
+for (const id of ["strategy-a", "strategy-b"]) $(id).addEventListener("input", () => {
+  strategyPrice.generation += 1; strategyPrice.quotes = []; strategyPrice.receivedAt = 0; strategyPrice.error = "";
+  renderStrategyPricePreview(); scheduleStrategyPrices();
+});
+$("strategy-form").addEventListener("input", event => {
+  renderStrategyPricePreview();
+  if (event.target.id === "strategy-qty") scheduleStrategyPrices();
+});
+$("strategy-refresh-prices").addEventListener("click", () => scheduleStrategyPrices(true));
+$("strategy-auto-prices").addEventListener("change", () => {
+  if ($("strategy-auto-prices").checked) scheduleStrategyPrices(); else clearTimeout(strategyPrice.timer);
+});
+$("strategy-swap-symbols").addEventListener("click", () => {
+  const a = $("strategy-a").value; $("strategy-a").value = $("strategy-b").value; $("strategy-b").value = a;
+  strategyPrice.generation += 1; strategyPrice.quotes = []; renderStrategyPricePreview(); scheduleStrategyPrices();
+});
+$("strategy-use-current-z").addEventListener("click", () => {
+  if (!strategyPrice.preview?.fresh) return;
+  $("strategy-z").value = String(strategyPrice.preview.askSum); renderStrategyPricePreview();
+});
+document.addEventListener("visibilitychange", () => {if (!document.hidden) scheduleStrategyPrices();});
+setInterval(() => {if ($("strategy-auto-prices").checked && !strategyPrice.timer && !strategyPrice.loading && canFetchStrategyPrices()) scheduleStrategyPrices(true);}, 15000);
+
 async function loadStrategies() {
   const result = await api("/v1/strategies");
   $("strategy-list").replaceChildren();
@@ -651,4 +778,5 @@ boot();
 setInterval(() => {
   if (state.system?.environment === "production") renderSystem();
   if (state.confirm?.expiresAt) updateControls();
+  if (!$("panel-strategies").hidden && strategyPrice.quotes.length) renderStrategyPricePreview();
 }, 1000);

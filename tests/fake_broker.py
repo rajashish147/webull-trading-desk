@@ -14,6 +14,7 @@ class FakeBroker:
         self.account_summary = None
         self.order_data = {}
         self.place_calls = self.replace_calls = self.cancel_calls = 0
+        self.quote_calls = 0
         self.place_error = self.replace_error = self.cancel_error = None
         self.hold_replace = self.hold_cancel = False
         self.cash = "100000"
@@ -55,6 +56,7 @@ class FakeBroker:
         return {"data": list(self.order_data.values())}
 
     def quotes(self, symbols):
+        self.quote_calls += 1
         self._ready()
         return [{"symbol": symbol, "price": self.quote_price, "ask": self.quote_price, "bid": self.quote_price,
                  "quote_time": int((time.time() - self.quote_age) * 1000), "trade_status": self.trade_status} for symbol in symbols]

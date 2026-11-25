@@ -42,6 +42,8 @@ class LocalUITests(unittest.TestCase):
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(self.client.get("/static/styles.css").status_code, 200)
         self.assertEqual(self.client.get("/static/app.js").status_code, 200)
+        self.assertEqual(self.client.get("/static/strategy-preview.mjs").status_code, 200)
+        self.assertIn("strategy-ask-sum", response.text)
 
     def test_api_console_is_separate_local_page_with_csp(self):
         response = self.client.get("/api-console")

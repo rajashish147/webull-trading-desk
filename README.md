@@ -39,6 +39,10 @@ policy/window authorization in addition to global live arming. This is not atomi
 pair execution, guaranteed profit/stop-loss, or proven production reliability.
 Read **[STRATEGIES.md](docs/STRATEGIES.md)** before arming it.
 
+The strategy form automatically loads entered stocks and displays combined ask/bid
+sums, share-adjusted cost, fee buffer, target/downside distances and budget warnings.
+Refreshes are debounced/quota-protected and never arm or submit an order.
+
 ## Already running? Daily-use guide
 
 Read **[the dashboard user guide](docs/USER_GUIDE.md)** for the button-by-button
@@ -142,6 +146,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\ruff.exe check trading manage.py tests
 node --test tests/console_core.test.mjs
+node --test tests/strategy_preview.test.mjs
 ```
 
 Tests use mocked brokerage transport and temporary databases. For runtime only,

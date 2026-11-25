@@ -37,7 +37,7 @@ def main():
         @app.get("/fixture/stats", include_in_schema=False)
         def stats():
             return {"simulated": True, "real_broker_mutations": 0, "profiles": {
-                name: {"place": broker.place_calls, "replace": broker.replace_calls, "cancel": broker.cancel_calls}
+                name: {"place": broker.place_calls, "replace": broker.replace_calls, "cancel": broker.cancel_calls, "quotes": broker.quote_calls}
                 for name, broker in brokers.items()
             }}
 

@@ -33,6 +33,30 @@ Open **Strategies → Create strategy** and fill:
 | Leg timeout | 10–120 seconds |
 | Authorization | 30–600 seconds |
 
+### Automatic quote and cost preview
+
+After connecting, entered valid symbols are fetched automatically. Typing is
+debounced, and requests are spaced by at least five seconds. With **Auto-update
+entered stocks** enabled, quotes refresh every 15 seconds only while the Strategies
+page and browser tab are visible. Quota errors back off for 60 seconds.
+
+The preview shows each stock's last/bid/ask, quote age and market state, plus:
+
+- Current **per-share** ask(A)+ask(B) and bid(A)+bid(B).
+- Entry value for both legs × **Shares each**, and a fee-buffer estimate.
+- Distances to Z, Z+a and Z−b; theoretical gross differences, not net P&L.
+- Current spread × shares, and bid-side position-value estimate.
+- Warnings for stale/incomplete/skewed quotes, pair budget, per-leg quantity/value
+  caps, invalid downside settings, and insufficient daily submission capacity.
+
+Changing shares recalculates immediately and queues a debounced quote refresh.
+Use **Refresh prices** for a manual request, **Swap A / B** to swap form symbols,
+or **Use current ask sum as Z** to deliberately copy a fresh sum into the threshold.
+Auto-refresh never overwrites Z/a/b, modifies a saved strategy, arms it, or trades.
+Profile changes clear old quotes and form thresholds, and late old-profile/symbol
+responses are discarded. Preview arithmetic is advisory; backend Decimal-based
+risk and strategy checks still decide whether a trade is allowed.
+
 **Save disabled strategy** does not arm or trade. Connect and enable sandbox,
 then click **Arm sandbox strategy**, review the policy, type **ARM SANDBOX STRATEGY**
 and confirm. It can now trade automatically within that window without per-order

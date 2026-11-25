@@ -8,7 +8,7 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/strategies.css">
-  <script src="/static/app.js" defer></script>
+  <script type="module" src="/static/app.js"></script>
 </head>
 <body>
   <div class="shell">
@@ -85,7 +85,13 @@
         <article class="card"><div class="card-header"><div><h2>Create strategy</h2><p>Equal whole-share quantities · DAY limits · finite cycles and authorization window</p></div></div><form id="strategy-form" class="strategy-form">
           <label>Name<input id="strategy-name" value="Two-stock sum" required maxlength="80"></label>
           <div class="form-row"><label>Stock A<input id="strategy-a" value="AAPL" required></label><label>Stock B<input id="strategy-b" value="MSFT" required></label><label>Shares each<input id="strategy-qty" type="number" value="1" min="1" step="1" required></label></div>
+          <div class="strategy-price-toolbar"><label class="checkbox-label"><input id="strategy-auto-prices" type="checkbox" checked> Auto-update entered stocks (15s while this page is visible)</label><div class="inline-actions"><button id="strategy-refresh-prices" type="button" class="button secondary small" disabled>Refresh prices</button><button id="strategy-swap-symbols" type="button" class="button secondary small">Swap A / B</button></div></div>
+          <div id="strategy-price-status" class="strategy-price-status" role="status" aria-live="polite">Connect Webull to fetch the entered stocks.</div>
+          <div class="table-wrap strategy-quote-table"><table><thead><tr><th>Stock</th><th>Last</th><th>Bid</th><th>Ask</th><th>Quote age / market</th></tr></thead><tbody id="strategy-input-quotes"><tr><td colspan="5" class="empty">Quotes will load automatically after valid symbols are entered.</td></tr></tbody></table></div>
+          <div class="strategy-preview-grid"><div><small>Current combined ask sum</small><strong id="strategy-ask-sum">—</strong></div><div><small>Current combined bid sum</small><strong id="strategy-bid-sum">—</strong></div><div><small>Entry estimate for shares each</small><strong id="strategy-current-cost">—</strong></div><div><small>Entry + fee buffer estimate</small><strong id="strategy-buffered-cost">—</strong></div></div>
+          <div class="strategy-price-toolbar"><p class="hint">Sums are per share; entry estimates include both stocks × shares each. These are display estimates, not an order or guaranteed fill.</p><button id="strategy-use-current-z" type="button" class="button secondary small" disabled>Use current ask sum as Z</button></div>
           <div class="form-row"><label>Entry sum Z<input id="strategy-z" type="number" min="0.000001" step="0.000001" required></label><label>Profit increment a<input id="strategy-profit" type="number" min="0.000001" step="0.000001" required></label><label>Downside delta b<input id="strategy-loss" type="number" min="0.000001" step="0.000001" required></label></div>
+          <div id="strategy-threshold-hints" class="strategy-threshold-hints"></div><div id="strategy-preview-warnings" class="notification error" hidden></div>
           <div class="form-row"><label>Max pair budget (USD)<input id="strategy-budget" type="number" value="1000" min="1" step="0.01" required></label><label>Max entry attempts<input id="strategy-cycles" type="number" value="2" min="1" max="5" step="1" required></label><label>Cooldown seconds<input id="strategy-cooldown" type="number" value="60" min="30" max="3600" step="1" required></label></div>
           <div class="form-row"><label>Leg timeout seconds<input id="strategy-timeout" type="number" value="30" min="10" max="120" step="1" required></label><label>Authorization seconds<input id="strategy-duration" type="number" value="300" min="30" max="600" step="1" required></label></div>
           <button class="button primary" type="submit">Save disabled strategy</button><p class="hint">Saving does not arm or trade. Live automation requires TRADING_ENABLE_LIVE_STRATEGIES=true, a global live arm, and a separate typed strategy authorization. Existing global order/risk caps still apply.</p>
