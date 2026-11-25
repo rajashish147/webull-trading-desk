@@ -49,6 +49,12 @@ class LocalUI:
                 raise HTTPException(403, "Dashboard is available on localhost only.")
             return FileResponse(WEB_ROOT / "index.html", media_type="text/html")
 
+        @app.get("/api-console", include_in_schema=False)
+        def api_console(request: Request):
+            if not self.local_request(request):
+                raise HTTPException(403, "API console is available on localhost only.")
+            return FileResponse(WEB_ROOT / "console.html", media_type="text/html")
+
         @app.get("/ui/session", include_in_schema=False)
         def session(request: Request):
             if not self.local_request(request) or request.headers.get("X-Local-UI") != "1":

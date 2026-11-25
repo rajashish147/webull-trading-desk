@@ -99,7 +99,7 @@ def create_app(config=None, broker=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        if request.url.path == "/" or request.url.path.startswith(("/static/", "/ui/")):
+        if request.url.path in {"/", "/api-console"} or request.url.path.startswith(("/static/", "/ui/")):
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
                 "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"

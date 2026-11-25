@@ -43,6 +43,36 @@ class LocalUITests(unittest.TestCase):
         self.assertEqual(self.client.get("/static/styles.css").status_code, 200)
         self.assertEqual(self.client.get("/static/app.js").status_code, 200)
 
+    def test_api_console_is_separate_local_page_with_csp(self):
+        response = self.client.get("/api-console")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("API Console", response.text)
+        self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
+        for path in ("/static/console.mjs", "/static/console-core.mjs", "/static/console.css"):
+            self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertIn("API testing console", self.client.get("/").text)
+        self.assertEqual(self.broker.place_calls, 0)
+
+    def test_console_rejects_remote_peers_and_rebinding_hosts(self):
+        self.assertEqual(self.client.get("/api-console", headers={"Host": "untrusted.example"}).status_code, 403)
+        remote = TestClient(self.client.app, base_url="http://127.0.0.1:8000", client=("192.0.2.1", 50000))
+        self.assertEqual(remote.get("/api-console").status_code, 403)
+
+    def test_console_page_and_scripts_do_not_include_env_credentials(self):
+        for path in ("/api-console", "/static/console.mjs", "/static/console-core.mjs"):
+            response = self.client.get(path)
+            for secret in (self.config.api_key, self.config.broker.app_key, self.config.broker.app_secret):
+                self.assertNotIn(secret, response.text)
+
+    def test_console_session_can_execute_existing_endpoints_without_api_key(self):
+        self.client.get("/api-console")
+        self.session()
+        self.assertEqual(self.client.get("/v1/system").status_code, 200)
+        self.assertEqual(self.client.get("/openapi.json").status_code, 200)
+        self.assertEqual(self.client.post("/v1/broker/connect").status_code, 200)
+        self.assertEqual(self.client.get("/v1/portfolio").status_code, 200)
+        self.assertEqual(self.broker.place_calls, 0)
+
     def test_browser_session_needs_no_api_key(self):
         response = self.session()
         self.assertEqual(set(response.json()), {"csrf_token", "configuration_source"})

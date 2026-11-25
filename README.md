@@ -16,6 +16,16 @@ real account. This is a personal, supervised cash-equity execution tool, **not a
 broker-certified or guaranteed production platform**. All development execution
 tests use mock brokers; no real-money orders are placed by setup or tests.
 
+## Postman-style API testing console
+
+Open **http://127.0.0.1:8000/api-console**, separately from the trading dashboard.
+Choose/edit endpoints, methods, path/query parameters, headers and JSON bodies;
+inspect the executed request, response status/timing, Pretty/Raw output and headers.
+The local session handles authentication automatically; `.env` keys stay in Python.
+History is redacted and memory-only. Live arming and one-use approvals are not bypassed.
+
+Read **[the API console guide](docs/API_CONSOLE.md)** before executing broker actions.
+
 ## Already running? Daily-use guide
 
 Read **[the dashboard user guide](docs/USER_GUIDE.md)** for the button-by-button
@@ -117,10 +127,12 @@ python -m venv .venv
 .\.venv\Scripts\python.exe manage.py init
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\ruff.exe check trading manage.py tests
+node --test tests/console_core.test.mjs
 ```
 
 Tests use mocked brokerage transport and temporary databases. For runtime only,
 install `requirements.txt`; the development file adds the HTTP test client and lint tool.
+Node is optional for the API-console JavaScript tests; it is not needed to run either UI.
 
 ## Original CLI (retained)
 
